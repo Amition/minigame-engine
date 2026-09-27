@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "sampleRate": 44100,
+  "sounds": {
+    "draw": {
+      "file": "audio/draw.mp3",
+      "kind": "sfx",
+      "duration": 0.34,
+      "bytes": 3134
+    },
+    "shoot": {
+      "file": "audio/shoot.mp3",
+      "kind": "sfx",
+      "duration": 0.158,
+      "bytes": 1671
+    },
+    "hit": {
+      "file": "audio/hit.mp3",
+      "kind": "sfx",
+      "duration": 0.122,
+      "bytes": 1253
+    },
+    "headshot": {
+      "file": "audio/headshot.mp3",
+      "kind": "sfx",
+      "duration": 0.271,
+      "bytes": 2507
+    },
+    "thunk": {
+      "file": "audio/thunk.mp3",
+      "kind": "sfx",
+      "duration": 0.155,
+      "bytes": 1462
+    },
+    "hurt": {
+      "file": "audio/hurt.mp3",
+      "kind": "sfx",
+      "duration": 0.238,
+      "bytes": 2298
+    },
+    "explode": {
+      "file": "audio/explode.mp3",
+      "kind": "sfx",
+      "duration": 0.626,
+      "bytes": 5224
+    },
+    "zap": {
+      "file": "audio/zap.mp3",
+      "kind": "sfx",
+      "duration": 0.24,
+      "bytes": 2298
+    },
+    "poison": {
+      "file": "audio/poison.mp3",
+      "kind": "sfx",
+      "duration": 0.36,
+      "bytes": 3134
+    },
+    "balloon": {
+      "file": "audio/balloon.mp3",
+      "kind": "sfx",
+      "duration": 0.218,
+      "bytes": 2089
+    },
+    "saw": {
+      "file": "audio/saw.mp3",
+      "kind": "sfx",
+      "duration": 0.3,
+      "bytes": 2716
+    },
+    "heal": {
+      "file": "audio/heal.mp3",
+      "kind": "sfx",
+      "duration": 0.476,
+      "bytes": 4179
+    },
+    "apple": {
+      "file": "audio/apple.mp3",
+      "kind": "sfx",
+      "duration": 0.379,
+      "bytes": 3343
+    },
+    "coin": {
+      "file": "audio/coin.mp3",
+      "kind": "sfx",
+      "duration": 0.304,
+      "bytes": 2716
+    },
+    "kill": {
+      "file": "audio/kill.mp3",
+      "kind": "sfx",
+      "duration": 0.297,
+      "bytes": 2716
+    },
+    "boss": {
+      "file": "audio/boss.mp3",
+      "kind": "sfx",
+      "duration": 2.076,
+      "bytes": 16927
+    },
+    "arrive": {
+      "file": "audio/arrive.mp3",
+      "kind": "sfx",
+      "duration": 0.28,
+      "bytes": 2507
+    },
+    "jump": {
+      "file": "audio/jump.mp3",
+      "kind": "sfx",
+      "duration": 0.12,
+      "bytes": 1253
+    },
+    "revive": {
+      "file": "audio/revive.mp3",
+      "kind": "sfx",
+      "duration": 1.107,
+      "bytes": 9195
+    },
+    "gameover": {
+      "file": "audio/gameover.mp3",
+      "kind": "sfx",
+      "duration": 2.04,
+      "bytes": 16718
+    },
+    "record": {
+      "file": "audio/record.mp3",
+      "kind": "sfx",
+      "duration": 1.858,
+      "bytes": 15255
+    },
+    "buy": {
+      "file": "audio/buy.mp3",
+      "kind": "sfx",
+      "duration": 0.44,
+      "bytes": 3761
+    },
+    "deny": {
+      "file": "audio/deny.mp3",
+      "kind": "sfx",
+      "duration": 0.16,
+      "bytes": 1671
+    },
+    "click": {
+      "file": "audio/click.mp3",
+      "kind": "sfx",
+      "duration": 0.034,
+      "bytes": 626
+    },
+    "equip": {
+      "file": "audio/equip.mp3",
+      "kind": "sfx",
+      "duration": 0.092,
+      "bytes": 1044
+    },
+    "bgm": {
+      "file": "audio/bgm.mp3",
+      "kind": "music",
+      "duration": 52.364,
+      "loopStart": 0.0345,
+      "loopEnd": 52.3982,
+      "bytes": 524160
+    },
+    "menu": {
+      "file": "audio/menu.mp3",
+      "kind": "music",
+      "duration": 45.714,
+      "loopStart": 0.046,
+      "loopEnd": 45.7603,
+      "bytes": 366144
+    }
+  }
+}
