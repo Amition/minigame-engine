@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "sampleRate": 44100,
+  "sounds": {
+    "coin": {
+      "file": "audio/coin.mp3",
+      "kind": "sfx",
+      "duration": 0.379,
+      "bytes": 3343
+    },
+    "pickup": {
+      "file": "audio/pickup.mp3",
+      "kind": "sfx",
+      "duration": 0.23,
+      "bytes": 2089
+    },
+    "jump": {
+      "file": "audio/jump.mp3",
+      "kind": "sfx",
+      "duration": 0.297,
+      "bytes": 2716
+    },
+    "hit": {
+      "file": "audio/hit.mp3",
+      "kind": "sfx",
+      "duration": 0.105,
+      "bytes": 1253
+    },
+    "hurt": {
+      "file": "audio/hurt.mp3",
+      "kind": "sfx",
+      "duration": 0.299,
+      "bytes": 2716
+    },
+    "explosion": {
+      "file": "audio/explosion.mp3",
+      "kind": "sfx",
+      "duration": 1.13,
+      "bytes": 9404
+    },
+    "powerup": {
+      "file": "audio/powerup.mp3",
+      "kind": "sfx",
+      "duration": 0.857,
+      "bytes": 7105
+    },
+    "laser": {
+      "file": "audio/laser.mp3",
+      "kind": "sfx",
+      "duration": 0.229,
+      "bytes": 2089
+    },
+    "shoot": {
+      "file": "audio/shoot.mp3",
+      "kind": "sfx",
+      "duration": 0.141,
+      "bytes": 1462
+    },
+    "click": {
+      "file": "audio/click.mp3",
+      "kind": "sfx",
+      "duration": 0.033,
+      "bytes": 626
+    },
+    "blip": {
+      "file": "audio/blip.mp3",
+      "kind": "sfx",
+      "duration": 0.08,
+      "bytes": 1044
+    },
+    "select": {
+      "file": "audio/select.mp3",
+      "kind": "sfx",
+      "duration": 0.19,
+      "bytes": 1880
+    },
+    "error": {
+      "file": "audio/error.mp3",
+      "kind": "sfx",
+      "duration": 0.36,
+      "bytes": 3134
+    },
+    "success": {
+      "file": "audio/success.mp3",
+      "kind": "sfx",
+      "duration": 0.991,
+      "bytes": 8150
+    },
+    "whoosh": {
+      "file": "audio/whoosh.mp3",
+      "kind": "sfx",
+      "duration": 0.378,
+      "bytes": 3343
+    },
+    "pop": {
+      "file": "audio/pop.mp3",
+      "kind": "sfx",
+      "duration": 0.08,
+      "bytes": 1044
+    },
+    "bubble": {
+      "file": "audio/bubble.mp3",
+      "kind": "sfx",
+      "duration": 0.13,
+      "bytes": 1253
+    },
+    "win": {
+      "file": "audio/win.mp3",
+      "kind": "sfx",
+      "duration": 1.638,
+      "bytes": 13374
+    },
+    "lose": {
+      "file": "audio/lose.mp3",
+      "kind": "sfx",
+      "duration": 2.372,
+      "bytes": 19226
+    },
+    "combo": {
+      "file": "audio/combo.mp3",
+      "kind": "sfx",
+      "duration": 0.44,
+      "bytes": 3761
+    },
+    "tick": {
+      "file": "audio/tick.mp3",
+      "kind": "sfx",
+      "duration": 0.043,
+      "bytes": 626
+    },
+    "menu": {
+      "file": "audio/menu.mp3",
+      "kind": "music",
+      "duration": 16,
+      "loopStart": 0.0251,
+      "loopEnd": 16.0251,
+      "bytes": 256626
+    },
+    "battle": {
+      "file": "audio/battle.mp3",
+      "kind": "music",
+      "duration": 13.333,
+      "loopStart": 0.0251,
+      "loopEnd": 13.3584,
+      "bytes": 213995
+    }
+  }
+}
