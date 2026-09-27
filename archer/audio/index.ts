@@ -14,6 +14,7 @@ import {
 //   draw       bow starts being drawn (string creak), rate 0.9..1.1
 //   shoot      arrow released: string twang + whoosh, rate = 0.85 + 0.3 * power (power 0..1)
 //   hit        arrow into a body (thud)
+//   clank      arrow into an armored body (metallic ping, a bit quieter than hit; hit events carry armor > 0)
 //   headshot   arrow into a head (sharper crack + small ding), played instead of hit
 //   thunk      arrow into stone (tower / floating block)
 //   hurt       the player is hit (lower, heavier than hit)
@@ -171,6 +172,21 @@ const hit = stack(
     voice({ wave: 'white', freq: 1000, sustain: 0.002, decay: 0.025, decayCurve: 2.5, bandpass: 1100, bandpassQ: 1.4, gain: 0.45 }),
   ],
   { volume: 0.55, seed: 35 },
+);
+
+/**
+ * Arrow glancing off armor: a bright strike tick and a short knock on the plate, then an A5 clink ringing with a
+ * slightly detuned D6 so the steel shimmers. Quieter than hit (it may play together with it).
+ */
+const clank = stack(
+  [
+    voice({ wave: 'white', freq: 1000, sustain: 0.001, decay: 0.012, bandpass: 3200, bandpassQ: 1.2 }),
+    voice({ wave: 'sine', freq: hz('D5'), slide: -20, sustain: 0.002, decay: 0.045, decayCurve: 3, punch: 0.4, gain: 0.7 }),
+    voice({ wave: 'metallic', freq: 1500, sustain: 0.002, decay: 0.03, bandpass: 4000, gain: 0.25 }),
+    ...clink(0.002, 'A5', 0.8, 0.22),
+    voice({ at: 0.003, wave: 'sine', freq: hz('D6') * 1.004, sustain: 0.002, decay: 0.16, decayCurve: 2.6, gain: 0.35 }),
+  ],
+  { volume: 0.45, seed: 81 },
 );
 
 /** Sharp crack over a smaller thud, then a small bright ding on A6 + D6. */
@@ -437,6 +453,7 @@ export const sfx: Record<string, SfxParams | (() => SfxParams)> = {
   draw,
   shoot,
   hit,
+  clank,
   headshot,
   thunk,
   hurt,

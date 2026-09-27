@@ -15,8 +15,11 @@ import { APPLES, ARROWS, COLORS, type ArrowId } from '../config';
 import { BODY, J, JOINT_COUNT, type FighterView, type PlatformView, type StuckArrowView, type Vec } from '../types';
 
 export interface GalleryParams {
-  /** 'sheet' (default): every asset at battle size; 'zoom': a few fighters, arrows and props enlarged. */
-  page?: 'sheet' | 'zoom';
+  /**
+   * 'sheet' (default): every asset at battle size; 'zoom': a few fighters, arrows and props enlarged; 'armor': the
+   * armor gear tiers on players, enemies, a boss and fallen bodies, plus close-ups.
+   */
+  page?: 'sheet' | 'zoom' | 'armor';
 }
 
 /** A node that runs a painter in its local space (world units once the node is scaled). */
@@ -75,6 +78,26 @@ const SLUMPED: Limbs = {
   armB: [Math.PI / 2 + 0.5, Math.PI / 2 + 0.9],
   legF: [-0.25, 0.25],
   legB: [-0.05, 0.03],
+};
+
+/** Flat on the back on the floor, head toward the back: arm along the body, the other flung over the head. */
+const LYING: Limbs = {
+  torso: Math.PI,
+  head: Math.PI + 0.06,
+  armF: [0.12, -0.15],
+  armB: [Math.PI - 0.3, Math.PI - 0.12],
+  legF: [-0.08, 0.04],
+  legB: [0.1, -0.03],
+};
+
+/** Flung upside down in mid-air: head and shoulders below the hips, limbs flailing. */
+const TUMBLE: Limbs = {
+  torso: 1.95,
+  head: 2.2,
+  armF: [0.5, 1.1],
+  armB: [2.9, 2.4],
+  legF: [-1.15, -0.6],
+  legB: [-1.9, -2.5],
 };
 
 const at = (o: Vec, angle: number, len: number): Vec => ({ x: o.x + Math.cos(angle) * len, y: o.y + Math.sin(angle) * len });
@@ -137,6 +160,7 @@ interface FighterSpec {
   stun?: number;
   balloons?: number;
   flash?: number;
+  armor?: number;
   /** Drop the pelvis this far above the standing height (jumps) or below it (sitting). */
   lift?: number;
 }
@@ -165,7 +189,7 @@ function fighter(spec: FighterSpec): FighterView & { stuck: StuckArrowView[] } {
     maxHp: 100,
     alive,
     boss: spec.boss ?? false,
-    armor: 0,
+    armor: spec.armor ?? 0,
     stuck: [],
     poison: spec.poison ?? 0,
     stun: spec.stun ?? 0,
@@ -189,7 +213,8 @@ const LABEL = COLORS.textDim;
 /**
  * Art review sheet (landscape, fits 1334x750 and wider views): backdrop, fighters in hand-built poses, every arrow at
  * battle size and as a menu card, tower and block with stuck arrows, apples, explosions, lightning and the icons.
- * `pnpm shot --app archer --scene gallery --device iphone-14-land` (add `--params '{"page":"zoom"}'` for close-ups).
+ * `pnpm shot --app archer --scene gallery --device iphone-14-land` (add `--params '{"page":"zoom"}'` for close-ups,
+ * `--params '{"page":"armor"}'` for the armor gear).
  */
 export class GalleryScene extends Scene {
   private clock = 0;
@@ -208,6 +233,7 @@ export class GalleryScene extends Scene {
     const ox = Math.round((w - SHEET_W) / 2);
     const oy = Math.round((h - SHEET_H) / 2);
     if (params?.page === 'zoom') this.buildZoom(ox, oy);
+    else if (params?.page === 'armor') this.buildArmor(ox, oy);
     else this.buildSheet(ox, oy);
   }
 
@@ -346,6 +372,77 @@ export class GalleryScene extends Scene {
     }
     APPLES.forEach((a, i) => this.add(new Sprite(ART_KEYS.apple(a.kind), { x: cx0 + 4 + i * 70, y: iy + 76 })));
     this.label('textures', cx0 + 230, iy + 108, 15, [0, 0.5]);
+  }
+
+  /** Armor gear: tiers side by side at battle size, a boss, fallen and tumbling bodies, effect overlays, close-ups. */
+  private buildArmor(ox: number, oy: number): void {
+    const k = 0.8;
+    const base = oy + 250;
+    const tiers: readonly [number, string][] = [
+      [0, 'armor 0'],
+      [2, '2 helmet'],
+      [4, '4 +plate'],
+      [8, '8 visor+guards'],
+    ];
+    tiers.forEach(([armor, label], i) => {
+      const p = fighter({ x: 0, feet: 0, aim: -0.3, armor });
+      this.world(ox + 50 + i * 130, base, k, (ctx) => drawFighter(ctx, p));
+      this.label(label, ox + 50 + i * 130, base + 14);
+      const e = fighter({ x: 0, feet: 0, side: 'enemy', aim: Math.PI + 0.3, hp: 100 - i * 20, armor });
+      this.world(ox + 640 + i * 130, base, k, (ctx) => drawFighter(ctx, e));
+      this.label(label, ox + 640 + i * 130, base + 14);
+    });
+
+    const block: PlatformView = { id: 5, kind: 'block', x: 0, y: 84, w: 120, h: 120, angle: Math.PI / 4, stuck: [] };
+    const boss = fighter({ x: 0, feet: 0, side: 'enemy', scale: 1.6, boss: true, aim: Math.PI + 0.2, draw: 1, nocked: 'axe', hp: 80, armor: 10 });
+    this.world(ox + 110, oy + 560, k, (ctx) => {
+      drawPlatform(ctx, block);
+      drawFighter(ctx, boss);
+    });
+    this.label('boss armor 10', ox + 110, oy + 716);
+
+    const tower: PlatformView = { id: 6, kind: 'tower', x: 0, y: 300, w: 220, h: 600, angle: 0, stuck: [] };
+    const slumped = fighter({ x: 12, feet: 0, limbs: SLUMPED, alive: false, lift: -72, nocked: null, armor: 8 });
+    slumped.stuck.push(stuckAt(lerpV(slumped.joints[J.neck]!, slumped.joints[J.pelvis]!, 0.45), Math.PI - 0.3, 'normal'));
+    this.world(ox + 300, oy + 640, k, (ctx) => {
+      drawPlatform(ctx, tower);
+      drawFighter(ctx, slumped);
+    });
+    this.label('dead 8', ox + 300, oy + 676);
+
+    const lying = fighter({ x: 0, feet: 0, side: 'enemy', limbs: LYING, alive: false, lift: -72, nocked: null, armor: 4 });
+    this.world(ox + 500, oy + 712, k, (ctx) => drawFighter(ctx, lying));
+    this.label('lying 4', ox + 500, oy + 730);
+    const tumble = fighter({ x: 0, feet: 0, side: 'enemy', limbs: TUMBLE, alive: false, nocked: null, armor: 7 });
+    tumble.stuck.push(stuckAt(lerpV(tumble.joints[J.neck]!, tumble.joints[J.pelvis]!, 0.5), 2.6, 'poison'));
+    this.world(ox + 500, oy + 520, k, (ctx) => drawFighter(ctx, tumble));
+    this.label('tumbling 7', ox + 500, oy + 560);
+
+    const fx = fighter({ x: 0, feet: 0, side: 'enemy', aim: Math.PI + 0.12, nocked: 'poison', hp: 45, balloons: 3, poison: 2.5, stun: 1, flash: 0.55, armor: 8 });
+    const q = fx.joints;
+    fx.stuck.push(
+      stuckAt(lerpV(q[J.neck]!, q[J.pelvis]!, 0.45), 0.12, 'normal'),
+      stuckAt(q[J.head]!, -0.1, 'vampire', 2),
+      stuckAt(lerpV(q[J.pelvis]!, q[J.kneeF]!, 0.55), 0.25, 'electric'),
+    );
+    this.world(ox + 660, oy + 640, k, (ctx) => drawFighter(ctx, fx));
+    this.label('hit fx 8', ox + 660, oy + 654);
+    const poisoned = fighter({ x: 0, feet: 0, side: 'enemy', aim: Math.PI + 0.3, hp: 30, poison: 2, armor: 4 });
+    this.world(ox + 770, oy + 640, k, (ctx) => drawFighter(ctx, poisoned));
+    this.label('poison 4', ox + 770, oy + 654);
+    const up = fighter({ x: 0, feet: 0, aim: -0.7, draw: 1, armor: 8 });
+    this.world(ox + 850, oy + 490, k, (ctx) => drawFighter(ctx, up));
+    this.label('draw up 8', ox + 850, oy + 504);
+    const jump = fighter({ x: 0, feet: 0, limbs: JUMP, lift: 34, aim: 0.25, draw: 0.8, nocked: 'split', armor: 2 });
+    this.world(ox + 850, oy + 700, k, (ctx) => drawFighter(ctx, jump));
+    this.label('jump 2', ox + 850, oy + 714);
+
+    const z = 1.7;
+    const hero = fighter({ x: 0, feet: 0, aim: -0.25, draw: 1, armor: 8 });
+    this.world(ox + 990, oy + 720, z, (ctx) => drawFighter(ctx, hero));
+    const foe = fighter({ x: 0, feet: 0, side: 'enemy', aim: Math.PI + 0.2, draw: 0.4, nocked: 'explosive', hp: 70, armor: 4 });
+    this.world(ox + 1250, oy + 720, z, (ctx) => drawFighter(ctx, foe));
+    this.label('close-up 8 / 4', ox + 1120, oy + 736);
   }
 
   /** Close-ups for reviewing details: fighters and props enlarged. */

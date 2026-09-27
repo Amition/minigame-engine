@@ -4,10 +4,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APPLES, ARROWS, COLORS, type ArrowId } from '../config';
 import app from '../main';
 import { BODY, J, JOINT_COUNT, type FighterView, type PlatformView, type StuckArrowView, type Vec } from '../types';
+import { ARMOR_COLORS } from './fighter';
 import {
   ARROW_CARD_H,
   ARROW_CARD_W,
   ART_KEYS,
+  armorTier,
   bakeArcherArt,
   drawApple,
   drawArrow,
@@ -79,13 +81,17 @@ function fighterView(over: Partial<FighterView> & { facing: 1 | -1 }): FighterVi
   };
 }
 
-/** Every fighter variant the battle can produce: all arrows nocked, all effects, both facings, dead, boss, collapsed. */
+/** Armor points covering every gear tier (none, helmet, + chest plate, visor + shoulder guards). */
+const ARMOR_LEVELS = [0, 1, 3, 6, 10] as const;
+
+/** Every fighter variant the battle can produce: all arrows nocked, all effects, all armor tiers, both facings, dead, boss, collapsed. */
 function fighterVariants(): FighterView[] {
   const out: FighterView[] = [];
   for (const facing of [1, -1] as const) {
     ARROW_IDS.forEach((nocked, i) => {
       const draw = (i % 3) / 2;
-      out.push(fighterView({ facing, nocked, draw, aimAngle: (facing === 1 ? 0 : Math.PI) + (i - 5) * 0.25 }));
+      const armor = ARMOR_LEVELS[i % ARMOR_LEVELS.length]!;
+      out.push(fighterView({ facing, nocked, draw, armor, aimAngle: (facing === 1 ? 0 : Math.PI) + (i - 5) * 0.25 }));
       out.push(
         fighterView({
           facing,
@@ -94,6 +100,7 @@ function fighterVariants(): FighterView[] {
           boss: i % 2 === 0,
           scale: i % 2 === 0 ? 1.6 : 1,
           side: 'enemy',
+          armor: ARMOR_LEVELS[(i + 2) % ARMOR_LEVELS.length]!,
           stuck: everyStuck(200, 200),
           poison: 3,
           stun: 1,
@@ -103,9 +110,12 @@ function fighterVariants(): FighterView[] {
       );
     });
     out.push(fighterView({ facing, alive: false, nocked: null, hp: 0, balloons: 2, stuck: everyStuck(200, 200) }));
+    out.push(fighterView({ facing, alive: false, nocked: null, hp: 0, armor: 8, stuck: everyStuck(200, 200) }));
     out.push(fighterView({ facing, side: 'enemy', hp: 250, maxHp: 0, boss: true }));
+    out.push(fighterView({ facing, side: 'enemy', scale: 1.6, boss: true, armor: 10, poison: 2, flash: 0.8 }));
     out.push(fighterView({ facing, joints: skeleton(200, 200, facing, 1, true), draw: 1, poison: 1, stun: 1, balloons: 3, boss: true }));
     out.push(fighterView({ facing, joints: skeleton(200, 200, facing, 1, true), alive: false, nocked: null, flash: 1 }));
+    out.push(fighterView({ facing, joints: skeleton(200, 200, facing, 1, true), alive: false, nocked: null, armor: 7, boss: true }));
   }
   return out;
 }
@@ -165,6 +175,29 @@ function countColor(tex: Texture, hex: string, split: number, tol = 40): { left:
     }
   }
   return out;
+}
+
+/** Opaque pixels of armor steel (lit metal or shaded plates), split left and right of x = split. */
+function steel(tex: Texture, split = 200): { left: number; right: number; total: number } {
+  const m = countColor(tex, ARMOR_COLORS.metal, split, 30);
+  const s = countColor(tex, ARMOR_COLORS.shade, split, 30);
+  return { left: m.left + s.left, right: m.right + s.right, total: m.left + m.right + s.left + s.right };
+}
+
+/** Topmost row with an opaque pixel of an RGB colour (within tol), or Infinity. */
+function colorTop(tex: Texture, hex: string, tol = 30): number {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const { data, width, height } = texturePixels(tex);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      if (data[i + 3]! < 200) continue;
+      if (Math.abs(data[i]! - r) + Math.abs(data[i + 1]! - g) + Math.abs(data[i + 2]! - b) <= tol) return y;
+    }
+  }
+  return Infinity;
 }
 
 /** Bounding box of opaque pixels in logical units. */
@@ -357,12 +390,87 @@ describe('world painters', () => {
   });
 });
 
+describe('armor gear', () => {
+  const CROWN = '#f5c542';
+  /** No nocked arrow (its grey head is close to steel); facing -1 stays a player unless side says otherwise (no HP bar). */
+  const plain = (over: Partial<FighterView> & { facing: 1 | -1 }): FighterView => fighterView({ side: 'player', nocked: null, ...over });
+  const shot = (f: FighterView): Texture => bake(400, 300, (ctx) => drawFighter(ctx, f));
+
+  it('maps armor points to the documented tiers', () => {
+    expect([0, -1, NaN, 1, 2, 3, 5, 6, 10, 40].map(armorTier)).toEqual([0, 0, 0, 1, 1, 2, 2, 3, 3, 3]);
+  });
+
+  it('paints steel only when the fighter has armor', () => {
+    for (const facing of [1, -1] as const) {
+      expect(steel(shot(plain({ facing, armor: 0 }))).total, `facing ${facing}`).toBe(0);
+      expect(steel(shot(plain({ facing, side: 'enemy', alive: false, boss: true, armor: 0 }))).total).toBe(0);
+      for (const armor of [1, 3, 6, 10]) {
+        expect(steel(shot(plain({ facing, armor }))).total, `facing ${facing} armor ${armor}`).toBeGreaterThan(300);
+      }
+    }
+  });
+
+  it('paints more steel on each higher tier and the same within a tier', () => {
+    const at = (armor: number) => steel(shot(plain({ facing: 1, armor }))).total;
+    const [t1, t2, t3] = [at(1), at(3), at(6)];
+    expect(at(2)).toBe(t1);
+    expect(at(5)).toBe(t2);
+    expect(at(10)).toBe(t3);
+    expect(t2).toBeGreaterThan(t1 * 2);
+    expect(t3).toBeGreaterThan(t2 * 1.3);
+  });
+
+  it('mirrors the gear with the facing: visor, lit chest half and front shoulder guard lead', () => {
+    const r = shot(plain({ facing: 1, armor: 8 }));
+    const l = shot(plain({ facing: -1, armor: 8 }));
+    const mr = countColor(r, ARMOR_COLORS.metal, 200, 30);
+    const ml = countColor(l, ARMOR_COLORS.metal, 200, 30);
+    expect(mr.right).toBeGreaterThan(mr.left * 1.5);
+    expect(ml.left).toBeGreaterThan(ml.right * 1.5);
+    const sr = steel(r);
+    const sl = steel(l);
+    expect(Math.abs(sr.left - sl.right)).toBeLessThanOrEqual(sr.left * 0.05 + 4);
+    expect(Math.abs(sr.right - sl.left)).toBeLessThanOrEqual(sr.right * 0.05 + 4);
+  });
+
+  it('scales the gear with bosses and lifts the crown onto the helmet', () => {
+    const small = steel(shot(plain({ facing: -1, armor: 8 }))).total;
+    const big = steel(shot(plain({ facing: -1, armor: 8, scale: 1.6, boss: true }))).total;
+    expect(big / small).toBeGreaterThan(1.6 * 1.6 * 0.8);
+    expect(big / small).toBeLessThan(1.6 * 1.6 * 1.2);
+    const crownTop = (armor: number) => colorTop(shot(plain({ facing: 1, armor, scale: 1.6, boss: true })), CROWN);
+    const bare = crownTop(0);
+    expect(bare).toBeLessThan(Infinity);
+    expect(crownTop(8)).toBeLessThan(bare - 3);
+    expect(crownTop(1)).toBe(crownTop(8));
+  });
+
+  it('keeps the hit flash, poison bubbles and stun sparks visible over the gear', () => {
+    setArtTime(1.3);
+    const cold = steel(shot(plain({ facing: 1, armor: 8 }))).total;
+    expect(steel(shot(plain({ facing: 1, armor: 8, flash: 1 }))).total).toBeLessThan(cold * 0.1);
+    expect(steel(shot(plain({ facing: 1, armor: 8, poison: 3 }))).total).toBeLessThan(cold * 0.5);
+    const bubbles = (armor: number) => {
+      const c = countColor(shot(plain({ facing: 1, armor, poison: 3 })), COLORS.poison, 200, 60);
+      return c.left + c.right;
+    };
+    expect(bubbles(8)).toBeGreaterThan(20);
+    expect(bubbles(8)).toBeGreaterThan(bubbles(0) * 0.6);
+    const sparks = countColor(shot(plain({ facing: 1, armor: 8, stun: 1 })), COLORS.electric, 200, 40);
+    expect(sparks.left + sparks.right).toBeGreaterThan(20);
+  });
+});
+
 describe('gallery scene', () => {
-  it('renders the review sheet and the zoom page', async () => {
+  it('renders the review sheet, the zoom page and the armor page', async () => {
     await t.step(2);
     expect(t.png().length).toBeGreaterThan(0);
     await t.go('gallery', { page: 'zoom' });
     await t.step(2);
     expect(t.png().length).toBeGreaterThan(0);
+    await t.go('gallery', { page: 'armor' });
+    await t.step(2);
+    expect(t.png().length).toBeGreaterThan(0);
+    expect(t.findAll('ArtPaint').length).toBeGreaterThan(15);
   });
 });

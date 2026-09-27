@@ -20,7 +20,8 @@ import { drawApple } from './world';
  *   'archer:apple-<kind>'     64 x 64   red / green / gold apple
  *   'archer:arrow-<id>'      300 x 56   arrow of each type lying horizontally, TIP ON THE LEFT (menu list cards)
  *
- * Modules: arrows.ts (drawArrow, drawStuckArrow, card art), fighter.ts (drawFighter, drawHpBar, nockDistance),
+ * Modules: arrows.ts (drawArrow, drawStuckArrow, card art), fighter.ts (drawFighter incl. armor gear, armorTier,
+ * drawHpBar, nockDistance),
  * world.ts (backdrop, platforms, apples, explosion, lightning), icons.ts (baked icon painters), common.ts (art clock).
  */
 export const ART_KEYS = {
@@ -54,6 +55,6 @@ export function bakeArcherArt(): void {
 
 export { drawArrow, drawArrowCard, drawStuckArrow } from './arrows';
 export { setArtTime } from './common';
-export { drawFighter, drawHpBar, nockDistance } from './fighter';
+export { armorTier, drawFighter, drawHpBar, nockDistance } from './fighter';
 export { paintFilmIcon, paintGearIcon, paintLockIcon, paintPodiumIcon, paintSkullIcon } from './icons';
 export { drawApple, drawBackdrop, drawExplosion, drawLightning, drawPlatform } from './world';

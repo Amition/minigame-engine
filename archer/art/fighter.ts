@@ -1,6 +1,6 @@
 import { clamp01, TAU, type Ctx2D } from '@engine';
 import { COLORS } from '../config';
-import { BODY, BONES, J, type FighterView } from '../types';
+import { BODY, BONES, J, type FighterView, type JointIndex } from '../types';
 import { drawArrow, drawStuckArrow } from './arrows';
 import { artTime, colorSteps, hash01, pickStep, rrect } from './common';
 
@@ -8,6 +8,8 @@ import { artTime, colorSteps, hash01, pickStep, rrect } from './common';
  * Stick-man archers. Everything is drawn live in world units from the joint snapshot (BODY sizes times f.scale):
  * back limbs, tapered torso with faint muscles, front leg, head, front (bow) arm, then bow, string, nocked arrow and
  * the fist on the grip. Arrows stuck in the body are painted first, so the body hides their embedded ends.
+ * Armor (armorTier) is steel gear layered into that order: back shoulder guard behind the torso, chest plate and
+ * helmet after the head, front shoulder guard over the bow arm.
  */
 
 const HALF_PI = Math.PI / 2;
@@ -36,6 +38,29 @@ const BALLOON_HI = 'rgba(255,255,255,0.55)';
 const BALLOON_COLORS = ['#ff6b9a', '#ffd166', '#7fd4ff', '#a3e635', '#c38bff'] as const;
 const BALLOON_KNOTS = ['#d94d7c', '#d9a93f', '#4fa9d6', '#7fb82a', '#9a62d9'] as const;
 
+/** Blue-grey steel: dark outline (also the visor slit), shaded far plates, lit metal, highlight. */
+export const ARMOR_COLORS = {
+  dark: '#232a36',
+  shade: '#667489',
+  metal: '#98a8bd',
+  hi: '#e6eef7',
+} as const;
+const ARMOR_FLASH = colorSteps(ARMOR_COLORS.metal, '#f4a7a7', TINT_STEPS);
+const ARMOR_FLASH_SHADE = colorSteps(ARMOR_COLORS.shade, '#c8676c', TINT_STEPS);
+const ARMOR_POISON = colorSteps(ARMOR_COLORS.metal, '#a9d493', TINT_STEPS);
+const ARMOR_POISON_SHADE = colorSteps(ARMOR_COLORS.shade, '#6c9a57', TINT_STEPS);
+const ARMOR_LINE = 1.6;
+/** Helmet shell radius (local units at scale 1): a little proud of the head. */
+const HELM_R = BODY.headR + 2.4;
+/** How far a helmet pushes the boss crown up along the neck->head axis. */
+const HELM_LIFT = 3.5;
+
+/** Gear drawn for armor points: 0 none, 1 helmet (1-2), 2 helmet + chest plate (3-5), 3 visor helmet + chest plate + shoulder guards (6+). */
+export function armorTier(armor: number): 0 | 1 | 2 | 3 {
+  if (!(armor > 0)) return 0;
+  return armor < 3 ? 1 : armor < 6 ? 2 : 3;
+}
+
 /**
  * Bow geometry (local units at scale 1, grip at the origin, +x = aim): the string's rest line lies BOW_REST behind
  * the grip and a full draw pulls the nock BOW_PULL further back (about the chin when the bow arm is straight).
@@ -61,14 +86,21 @@ const BONE_KIND: readonly number[] = BONES.map(([a, b]) => {
 export function drawFighter(ctx: Ctx2D, f: FighterView): void {
   const flash = clamp01(f.flash);
   const pois = f.poison > 0 ? 0.35 + 0.35 * clamp01(f.poison / 3) : 0;
+  const tier = armorTier(f.armor);
   let front: string = COLORS.figure;
   let back: string = COLORS.figureShade;
+  let metal: string = ARMOR_COLORS.metal;
+  let shade: string = ARMOR_COLORS.shade;
   if (flash > 0.02) {
     front = pickStep(FLASH_FRONT, flash * 0.85);
     back = pickStep(FLASH_BACK, flash * 0.85);
+    metal = pickStep(ARMOR_FLASH, flash * 0.85);
+    shade = pickStep(ARMOR_FLASH_SHADE, flash * 0.85);
   } else if (pois > 0) {
     front = pickStep(POISON_FRONT, pois);
     back = pickStep(POISON_BACK, pois);
+    metal = pickStep(ARMOR_POISON, pois * 0.7);
+    shade = pickStep(ARMOR_POISON_SHADE, pois * 0.7);
   }
   ctx.save();
   ctx.lineCap = 'round';
@@ -86,7 +118,7 @@ export function drawFighter(ctx: Ctx2D, f: FighterView): void {
     paintSilhouette(ctx, f, '#ffffff', 5 * f.scale);
     ctx.globalAlpha = 1;
   }
-  paintBody(ctx, f, front, back);
+  paintBody(ctx, f, front, back, tier, metal, shade);
   paintBow(ctx, f, front);
   if (pois > 0) paintPoison(ctx, f);
   if (f.stun > 0) paintStun(ctx, f);
@@ -95,7 +127,7 @@ export function drawFighter(ctx: Ctx2D, f: FighterView): void {
   if (f.side === 'enemy' && f.alive) drawHpBar(ctx, f);
 }
 
-function paintBody(ctx: Ctx2D, f: FighterView, front: string, back: string): void {
+function paintBody(ctx: Ctx2D, f: FighterView, front: string, back: string, tier: number, metal: string, shade: string): void {
   const p = f.joints;
   const lw = BODY.limbW * f.scale;
   let open = -1;
@@ -110,6 +142,7 @@ function paintBody(ctx: Ctx2D, f: FighterView, front: string, back: string): voi
       open = -1;
     }
     if (kind === 1) {
+      if (tier >= 3) paintPauldron(ctx, f, J.elbowB, shade, shade);
       paintTorso(ctx, f, front);
       continue;
     }
@@ -127,9 +160,12 @@ function paintBody(ctx: Ctx2D, f: FighterView, front: string, back: string): voi
       ctx.stroke();
       open = -1;
       paintHead(ctx, f, front);
+      if (tier >= 2) paintChestPlate(ctx, f, tier, metal, shade);
+      if (tier >= 1) paintHelmet(ctx, f, tier, metal, shade);
     }
   }
   if (open >= 0) ctx.stroke();
+  if (tier >= 3) paintPauldron(ctx, f, J.elbowF, metal, shade);
 }
 
 /** Tapered capsule from the shoulders (wide) to the pelvis (narrow) plus faint chest and ab shading. */
@@ -209,6 +245,167 @@ function paintHead(ctx: Ctx2D, f: FighterView, color: string): void {
   ctx.fill();
 }
 
+/** Fill with the current fillStyle, then the dark gear outline. */
+function fillOutlined(ctx: Ctx2D, fill: string): void {
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = ARMOR_LINE;
+  ctx.strokeStyle = ARMOR_COLORS.dark;
+  ctx.stroke();
+}
+
+/** Helmet in a head frame: origin at the head centre, -y along neck->head, +x toward the facing side, scale units. */
+function paintHelmet(ctx: Ctx2D, f: FighterView, tier: number, metal: string, shade: string): void {
+  const h = f.joints[J.head]!;
+  upAxis(f, up);
+  ctx.save();
+  ctx.translate(h.x, h.y);
+  ctx.rotate(Math.atan2(up.y, up.x) + HALF_PI);
+  ctx.scale(f.facing * f.scale, f.scale);
+  if (tier >= 3) paintVisorHelm(ctx, metal, shade);
+  else paintCap(ctx, metal, shade);
+  ctx.restore();
+}
+
+/** Open steel cap: dome over the brow, a highlight on the crown, a brim band jutting out over the face. */
+function paintCap(ctx: Ctx2D, metal: string, shade: string): void {
+  ctx.beginPath();
+  ctx.arc(0, -1, HELM_R, Math.PI, TAU);
+  ctx.closePath();
+  fillOutlined(ctx, metal);
+  ctx.beginPath();
+  ctx.arc(0, -1, HELM_R - 4.2, Math.PI + 0.5, Math.PI + 1.35);
+  ctx.lineWidth = 2.6;
+  ctx.strokeStyle = ARMOR_COLORS.hi;
+  ctx.stroke();
+  ctx.beginPath();
+  rrect(ctx, -HELM_R - 1.2, -3, 2 * HELM_R + 5.5, 5.6, 2.8);
+  fillOutlined(ctx, shade);
+}
+
+/** Closed helm: round shell, a visor plate with a snout pivoting on a side rivet, eye slit and breath holes. */
+function paintVisorHelm(ctx: Ctx2D, metal: string, shade: string): void {
+  ctx.beginPath();
+  ctx.arc(0, 0, HELM_R, 0, TAU);
+  fillOutlined(ctx, shade);
+  ctx.beginPath();
+  ctx.arc(0, 0, HELM_R - 4, Math.PI + 0.45, Math.PI + 1.4);
+  ctx.lineWidth = 2.4;
+  ctx.strokeStyle = ARMOR_COLORS.hi;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-3.5, -11);
+  ctx.quadraticCurveTo(12, -15.5, HELM_R + 3.5, -2);
+  ctx.quadraticCurveTo(HELM_R + 1.5, 11, 6.5, HELM_R - 1);
+  ctx.quadraticCurveTo(-2.5, 12, -3.5, -11);
+  ctx.closePath();
+  fillOutlined(ctx, metal);
+  ctx.beginPath();
+  rrect(ctx, 2, -6, HELM_R + 1, 3.6, 1.8);
+  ctx.moveTo(10.5, 6);
+  ctx.arc(9.5, 6, 1.1, 0, TAU);
+  ctx.moveTo(15, 5);
+  ctx.arc(14, 5, 1.1, 0, TAU);
+  ctx.moveTo(13.5, 9.8);
+  ctx.arc(12.5, 9.8, 1.1, 0, TAU);
+  ctx.fillStyle = ARMOR_COLORS.dark;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-2, -0.5, 2.2, 0, TAU);
+  ctx.fillStyle = ARMOR_COLORS.hi;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = ARMOR_COLORS.dark;
+  ctx.stroke();
+}
+
+/**
+ * Breastplate in the torso frame (origin at the neck, +y down the spine, +x toward the chest side, scale units):
+ * shaded back half, lit chest half split by a keel ridge, neckline scooped around the neck. Tier 3 adds two faulds.
+ */
+function paintChestPlate(ctx: Ctx2D, f: FighterView, tier: number, metal: string, shade: string): void {
+  const n = f.joints[J.neck]!;
+  const pv = f.joints[J.pelvis]!;
+  const dx = pv.x - n.x;
+  const dy = pv.y - n.y;
+  const a = Math.abs(dx) + Math.abs(dy) < 1e-3 ? HALF_PI : Math.atan2(dy, dx);
+  ctx.save();
+  ctx.translate(n.x, n.y);
+  ctx.rotate(a - HALF_PI);
+  ctx.scale(f.facing * f.scale, f.scale);
+  if (tier >= 3) {
+    ctx.beginPath();
+    rrect(ctx, -10, 44, 22, 7, 3.5);
+    fillOutlined(ctx, shade);
+    ctx.beginPath();
+    rrect(ctx, -11.5, 37.5, 25, 7.5, 3.75);
+    fillOutlined(ctx, metal);
+  }
+  ctx.beginPath();
+  breastplatePath(ctx);
+  ctx.fillStyle = metal;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-13, 2);
+  ctx.quadraticCurveTo(-13.5, -6.5, -6.5, -6);
+  ctx.quadraticCurveTo(-2.5, -3.5, 1.5, -3.5);
+  ctx.lineTo(1.5, 44);
+  ctx.quadraticCurveTo(-6, 43, -10.5, 33);
+  ctx.quadraticCurveTo(-12.8, 22, -13, 2);
+  ctx.closePath();
+  ctx.fillStyle = shade;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(4, -2);
+  ctx.lineTo(4, 38);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = ARMOR_COLORS.hi;
+  ctx.stroke();
+  ctx.beginPath();
+  breastplatePath(ctx);
+  ctx.lineWidth = ARMOR_LINE;
+  ctx.strokeStyle = ARMOR_COLORS.dark;
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Breastplate outline; the shaded back half in paintChestPlate reuses its back-side curves and keel point. */
+function breastplatePath(ctx: Ctx2D): void {
+  ctx.moveTo(-13, 2);
+  ctx.quadraticCurveTo(-13.5, -6.5, -6.5, -6);
+  ctx.quadraticCurveTo(1.5, -1, 9.5, -6);
+  ctx.quadraticCurveTo(15.5, -6.5, 15, 2);
+  ctx.quadraticCurveTo(14.5, 22, 12, 33);
+  ctx.quadraticCurveTo(9, 43, 1.5, 44);
+  ctx.quadraticCurveTo(-6, 43, -10.5, 33);
+  ctx.quadraticCurveTo(-12.8, 22, -13, 2);
+  ctx.closePath();
+}
+
+/** Layered shoulder guard over the shoulder end of an upper arm (frame: origin at the neck, +x toward the elbow). */
+function paintPauldron(ctx: Ctx2D, f: FighterView, elbow: JointIndex, cap: string, lame: string): void {
+  const n = f.joints[J.neck]!;
+  const e = f.joints[elbow]!;
+  const dx = e.x - n.x;
+  const dy = e.y - n.y;
+  const a = Math.abs(dx) + Math.abs(dy) < 1e-3 ? HALF_PI : Math.atan2(dy, dx);
+  ctx.save();
+  ctx.translate(n.x, n.y);
+  ctx.rotate(a);
+  ctx.scale(f.scale, f.scale);
+  ctx.beginPath();
+  ctx.ellipse(17, 0, 5.5, 7.6, 0, 0, TAU);
+  fillOutlined(ctx, lame);
+  ctx.beginPath();
+  ctx.ellipse(10.5, 0, 8.5, 9.6, 0, 0, TAU);
+  fillOutlined(ctx, cap);
+  ctx.beginPath();
+  ctx.ellipse(9.5, 0, 4, 2.2, 0, 0, TAU);
+  ctx.fillStyle = ARMOR_COLORS.hi;
+  ctx.fill();
+  ctx.restore();
+}
+
 /** Every bone, the torso and the head as one wide stroke: boss rim and hit glow. */
 function paintSilhouette(ctx: Ctx2D, f: FighterView, color: string, extra: number): void {
   const p = f.joints;
@@ -230,7 +427,7 @@ function paintSilhouette(ctx: Ctx2D, f: FighterView, color: string, extra: numbe
   ctx.lineTo(p[J.pelvis]!.x, p[J.pelvis]!.y);
   ctx.stroke();
   ctx.beginPath();
-  ctx.arc(p[J.head]!.x, p[J.head]!.y, BODY.headR * s + extra / 2, 0, TAU);
+  ctx.arc(p[J.head]!.x, p[J.head]!.y, (f.armor > 0 ? HELM_R + 1 : BODY.headR) * s + extra / 2, 0, TAU);
   ctx.fill();
 }
 
@@ -446,9 +643,9 @@ function paintCrown(ctx: Ctx2D, f: FighterView): void {
   const s = f.scale;
   const h = f.joints[J.head]!;
   upAxis(f, up);
-  const R = BODY.headR * s;
+  const d = (BODY.headR * 0.82 + (f.armor > 0 ? HELM_LIFT : 0)) * s;
   ctx.save();
-  ctx.translate(h.x + up.x * R * 0.82, h.y + up.y * R * 0.82);
+  ctx.translate(h.x + up.x * d, h.y + up.y * d);
   ctx.rotate(Math.atan2(up.y, up.x) + HALF_PI);
   ctx.scale(s, s);
   ctx.beginPath();

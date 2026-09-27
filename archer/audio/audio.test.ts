@@ -9,6 +9,7 @@ const SFX_LIMITS: Record<string, number> = {
   draw: 0.4,
   shoot: 0.25,
   hit: 0.2,
+  clank: 0.3,
   headshot: 0.35,
   thunk: 0.2,
   hurt: 0.3,
@@ -34,7 +35,7 @@ const SFX_LIMITS: Record<string, number> = {
 };
 
 /** Played many times per round: short, soft and not too bright. */
-const FREQUENT = ['draw', 'shoot', 'hit', 'thunk', 'click'];
+const FREQUENT = ['draw', 'shoot', 'hit', 'clank', 'thunk', 'click'];
 
 const params = (name: string): SfxParams => {
   const def = sfx[name]!;
@@ -70,6 +71,15 @@ describe('archer audio contract', () => {
     // rate 0.85..1.15 stretches the length by 1/rate; the slowest shot must still be short.
     const a = analyzeAudio(renderSfx(params('shoot'), SR), SR, { kind: 'sfx' });
     expect(a.duration / 0.85).toBeLessThan(0.3);
+  });
+
+  it('clank is a short bright ping that sits a little under hit', () => {
+    const clank = analyzeAudio(renderSfx(params('clank'), SR), SR, { kind: 'sfx' });
+    const hit = analyzeAudio(renderSfx(params('hit'), SR), SR, { kind: 'sfx' });
+    expect(clank.duration).toBeGreaterThanOrEqual(0.15);
+    expect(clank.loudnessDb).toBeLessThan(hit.loudnessDb - 1);
+    expect(clank.loudnessDb).toBeGreaterThan(hit.loudnessDb - 8);
+    expect(clank.centroidHz).toBeGreaterThan(hit.centroidHz * 1.5);
   });
 
   it('draw rises over about a third of a second', () => {

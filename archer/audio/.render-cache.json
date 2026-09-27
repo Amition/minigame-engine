@@ -681,6 +681,31 @@
     "verdict": "ok",
     "seamJump": 0.003383856979546943
    }
+  },
+  "clank": {
+   "file": "audio/clank.mp3",
+   "kind": "sfx",
+   "duration": 0.216,
+   "bytes": 2089,
+   "hash": "1171d96f0233d6d7",
+   "analysis": {
+    "duration": 0.21573696145124716,
+    "channels": 1,
+    "peak": 0.44999998807907104,
+    "peakDb": -6.935749954590626,
+    "rmsDb": -23.65498971084985,
+    "loudnessDb": -15.19696211833801,
+    "crestDb": 16.719239756259224,
+    "clipped": 0,
+    "dcOffset": -0.00006773524700453995,
+    "leadingSilence": 0.000022675736961451248,
+    "trailingSilence": 0.017369614512471654,
+    "centroidHz": 2056.385059190398,
+    "zcr": 1844.8391843598909,
+    "onsets": 1,
+    "issues": [],
+    "verdict": "ok"
+   }
   }
  }
 }

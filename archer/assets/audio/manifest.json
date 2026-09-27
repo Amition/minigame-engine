@@ -20,6 +20,12 @@
       "duration": 0.122,
       "bytes": 1253
     },
+    "clank": {
+      "file": "audio/clank.mp3",
+      "kind": "sfx",
+      "duration": 0.216,
+      "bytes": 2089
+    },
     "headshot": {
       "file": "audio/headshot.mp3",
       "kind": "sfx",
