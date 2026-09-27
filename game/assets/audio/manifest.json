@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "sampleRate": 44100,
+  "sounds": {
+    "drop": {
+      "file": "audio/drop.mp3",
+      "kind": "sfx",
+      "duration": 0.195,
+      "bytes": 1880
+    },
+    "spawn": {
+      "file": "audio/spawn.mp3",
+      "kind": "sfx",
+      "duration": 0.072,
+      "bytes": 835
+    },
+    "merge": {
+      "file": "audio/merge.mp3",
+      "kind": "sfx",
+      "duration": 0.249,
+      "bytes": 2298
+    },
+    "merge-big": {
+      "file": "audio/merge-big.mp3",
+      "kind": "sfx",
+      "duration": 0.64,
+      "bytes": 5433
+    },
+    "watermelon": {
+      "file": "audio/watermelon.mp3",
+      "kind": "sfx",
+      "duration": 2.005,
+      "bytes": 16300
+    },
+    "combo": {
+      "file": "audio/combo.mp3",
+      "kind": "sfx",
+      "duration": 0.354,
+      "bytes": 3134
+    },
+    "warning": {
+      "file": "audio/warning.mp3",
+      "kind": "sfx",
+      "duration": 0.113,
+      "bytes": 1253
+    },
+    "gameover": {
+      "file": "audio/gameover.mp3",
+      "kind": "sfx",
+      "duration": 1.635,
+      "bytes": 13374
+    },
+    "record": {
+      "file": "audio/record.mp3",
+      "kind": "sfx",
+      "duration": 1.1,
+      "bytes": 9195
+    },
+    "click": {
+      "file": "audio/click.mp3",
+      "kind": "sfx",
+      "duration": 0.037,
+      "bytes": 626
+    },
+    "bgm": {
+      "file": "audio/bgm.mp3",
+      "kind": "music",
+      "duration": 44.444,
+      "loopStart": 0.0345,
+      "loopEnd": 44.479,
+      "bytes": 444960
+    }
+  }
+}
