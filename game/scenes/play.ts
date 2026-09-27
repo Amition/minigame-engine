@@ -37,8 +37,6 @@ export interface PlayParams {
   seed?: number;
 }
 
-type Squashable = { squash?: (strength?: number) => void };
-
 /** The game: jar, dropper, HUD, merge effects, pause and game over. */
 export class PlayScene extends Scene {
   model!: SuikaModel;
@@ -50,6 +48,7 @@ export class PlayScene extends Scene {
   private held: FruitNode | null = null;
   private readonly nodes = new Map<FruitBody, FruitNode>();
   private readonly happyUntil = new Map<FruitBody, number>();
+  private readonly surprisedUntil = new Map<FruitBody, number>();
   private scoreLabel!: Label;
   private bestLabel!: Label;
   private nextSlot!: Node;
@@ -195,11 +194,10 @@ export class PlayScene extends Scene {
         case 'merge':
           this.onMerge(e);
           break;
-        case 'impact': {
-          const n = this.nodes.get(e.body) as (FruitNode & Squashable) | undefined;
-          n?.squash?.(Math.min(0.22, e.strength / 6000));
+        case 'impact':
+          this.nodes.get(e.body)?.squash(Math.min(1, (e.strength - 300) / 1000));
+          if (e.strength > 900) this.surprisedUntil.set(e.body, this.time + 0.3);
           break;
-        }
         case 'danger':
           break;
         case 'gameover':
@@ -228,10 +226,10 @@ export class PlayScene extends Scene {
       n.rotation = body.angle;
       n.radius = body.r;
       let face: FruitFace = 'idle';
-      if (over) face = 'surprised';
+      if (over) face = 'worried';
       else if ((this.happyUntil.get(body) ?? 0) > this.time) face = 'happy';
       else if (danger.has(body)) face = 'worried';
-      else if (!body.landed) face = 'surprised';
+      else if (!body.landed || (this.surprisedUntil.get(body) ?? 0) > this.time) face = 'surprised';
       n.face = face;
     }
     const held = this.held;
@@ -268,13 +266,15 @@ export class PlayScene extends Scene {
       this.nodes.get(b)?.destroy();
       this.nodes.delete(b);
       this.happyUntil.delete(b);
+      this.surprisedUntil.delete(b);
     }
     const shown = fruit(Math.min(e.level, MAX_LEVEL));
     if (e.into) {
       const n = this.fruitLayer.add(new FruitNode(e.into.level, { x: e.x, y: e.y }));
       n.radius = e.into.r;
+      n.squash(0.8);
       this.nodes.set(e.into, n);
-      this.happyUntil.set(e.into, this.time + 1);
+      this.happyUntil.set(e.into, this.time + 0.7);
     }
     this.splash(e.x, e.y, e.level);
     this.popup(`+${e.points}`, e.x, e.y - shown.radius * 0.3, 34 + Math.min(24, e.level * 3), '#ffffff', '#d9480f');

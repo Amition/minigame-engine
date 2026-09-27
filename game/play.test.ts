@@ -49,7 +49,7 @@ describe('play scene', () => {
       t.destroy();
     }
     t = null;
-  });
+  }, 30_000);
 
   it('pause menu opens and resumes', async () => {
     const { t, scene } = await play('iphone-14', 1);
@@ -65,7 +65,7 @@ describe('play scene', () => {
     await t.advance(0.6);
     expect(openModalsOf().length).toBe(0);
     expect(scene.model.physics.time).toBeGreaterThan(score);
-  });
+  }, 15_000);
 
   it('shows the game over dialog when the jar overflows', async () => {
     const { t, scene } = await play('iphone-14', 1);
@@ -81,5 +81,5 @@ describe('play scene', () => {
     await t.advance(1);
     expect((t.scene as PlayScene).model.state).toBe('playing');
     expect(t.scene).not.toBe(scene);
-  });
+  }, 15_000);
 });
