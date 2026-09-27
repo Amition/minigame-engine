@@ -23,6 +23,11 @@ export const devices = {
   android: { width: 360, height: 800, pixelRatio: 2, safeInsets: { top: 32, right: 0, bottom: 0, left: 0 } },
   /** Tablet, 4:3. */
   ipad: { width: 768, height: 1024, pixelRatio: 2, safeInsets: { top: 24, right: 0, bottom: 20, left: 0 } },
+  /** Landscape profiles for apps with `orientation: 'landscape'` (status bar hidden, notch on the sides). */
+  'iphone-se-land': { width: 667, height: 375, pixelRatio: 2, safeInsets: { top: 0, right: 0, bottom: 0, left: 0 } },
+  'iphone-14-land': { width: 844, height: 390, pixelRatio: 2, safeInsets: { top: 0, right: 47, bottom: 21, left: 47 } },
+  'android-land': { width: 800, height: 360, pixelRatio: 2, safeInsets: { top: 0, right: 0, bottom: 0, left: 32 } },
+  'ipad-land': { width: 1024, height: 768, pixelRatio: 2, safeInsets: { top: 24, right: 0, bottom: 20, left: 0 } },
 } satisfies Record<string, DeviceSpec>;
 
 export type DeviceName = keyof typeof devices;

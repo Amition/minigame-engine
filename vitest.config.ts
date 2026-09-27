@@ -9,7 +9,7 @@ export default defineConfig({
     ],
   },
   test: {
-    include: ['engine/**/*.test.ts', 'tools/**/*.test.ts', 'tests/**/*.test.ts', 'sandbox/**/*.test.ts', 'game/**/*.test.ts'],
+    include: ['engine/**/*.test.ts', 'tools/**/*.test.ts', 'tests/**/*.test.ts', 'sandbox/**/*.test.ts', 'game/**/*.test.ts', 'archer/**/*.test.ts'],
     environment: 'node',
   },
 });

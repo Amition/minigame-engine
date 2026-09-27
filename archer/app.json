@@ -1,0 +1,19 @@
+{
+  "name": "布偶弓箭手",
+  "version": "0.1.0",
+  "orientation": "landscape",
+  "background": "#3b3b3d",
+  "appid": {
+    "wx": "",
+    "tt": "",
+    "tap": ""
+  },
+  "ads": {
+    "wx": { "rewarded": "", "interstitial": "" },
+    "tt": { "rewarded": "", "interstitial": "" },
+    "tap": { "rewarded": "", "interstitial": "" }
+  },
+  "share": {
+    "title": "布偶弓箭手：一箭爆头，你能守住几波？"
+  }
+}
