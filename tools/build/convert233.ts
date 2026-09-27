@@ -5,10 +5,10 @@
 //     `npx babel` (preset-env → ES5) over it, prepends wx_unity.js to game.js (removes GameGlobal.fetch),
 //     copies check-version.js and zips <target>/game into <target>/game.zip
 //   - asks for confirmation on stdin when <target> is not empty, and opens Explorer when done (os.startfile)
-import { spawnSync } from 'node:child_process';
-import { existsSync, rmSync, statSync } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 export function converterDir(): string {
   return process.env.MINIHOST_CONVERTER || join(tmpdir(), 'minihost-converter');
@@ -45,20 +45,47 @@ export interface ConvertResult {
   zip?: string;
   zipBytes?: number;
   message?: string;
+  /** Full converter output (also written to <targetDir>/convert.log). */
+  logFile?: string;
 }
 
-/** Converts a built wx package dir into <targetDir>/game.zip. Skips (ok: true, skipped) when no converter exists. */
+const outputOf = (r: SpawnSyncReturns<string>) => `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n${r.error.message}\n` : ''}`;
+
+/**
+ * Converts a built wx package dir into <targetDir>/game.zip. Skips (ok: true, skipped) when no converter exists.
+ * The converter's output goes to <targetDir>/convert.log; `log` gets one summary line, or the whole log on failure.
+ */
 export function convert233(wxDir: string, targetDir: string, log: (s: string) => void = console.log): ConvertResult {
   const conv = findConverter();
   if (!conv) return { ok: true, skipped: true, message: `converter not found at ${converterDir()}\n${CONVERTER_HELP}` };
   const py = findPython();
   if (!py) return { ok: false, message: `python not found on PATH\n${CONVERTER_HELP}` };
 
+  const t0 = Date.now();
+  let output = '';
+  const logFile = join(targetDir, 'convert.log');
+  const finish = (res: ConvertResult): ConvertResult => {
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(logFile, output);
+    const shown = relative(process.cwd(), logFile) || logFile;
+    if (res.ok) {
+      const zip = res.zip ? ` -> ${relative(process.cwd(), res.zip) || res.zip}` : '';
+      log(`[233] converted in ${((Date.now() - t0) / 1000).toFixed(1)} s${zip}  (converter log: ${shown})`);
+    } else {
+      log(`[233] converter output (${shown}):\n${output.trimEnd()}`);
+    }
+    return { ...res, logFile };
+  };
+
   const babel = join(conv, 'node_modules', '.bin', process.platform === 'win32' ? 'babel.cmd' : 'babel');
   if (!existsSync(babel)) {
     log(`[233] installing converter dependencies: npm install (in ${conv})`);
-    const r = spawnSync('npm install --no-audit --no-fund', { cwd: conv, stdio: 'inherit', shell: true });
-    if (r.status !== 0 || !existsSync(babel)) return { ok: false, message: `npm install failed in ${conv}\n${CONVERTER_HELP}` };
+    const r = spawnSync('npm install --no-audit --no-fund', { cwd: conv, shell: true, encoding: 'utf8', maxBuffer: 64 << 20 });
+    output += `$ npm install --no-audit --no-fund  (cwd ${conv})\n${outputOf(r)}\n`;
+    if (r.status !== 0 || !existsSync(babel)) {
+      rmSync(targetDir, { recursive: true, force: true });
+      return finish({ ok: false, message: `npm install failed in ${conv}\n${CONVERTER_HELP}` });
+    }
   }
 
   rmSync(targetDir, { recursive: true, force: true });
@@ -66,16 +93,18 @@ export function convert233(wxDir: string, targetDir: string, log: (s: string) =>
   const code =
     "import os,runpy,sys; os.startfile=lambda *a,**k: None; sys.argv=['wx_converter.py']+sys.argv[1:]; " +
     "runpy.run_path('wx_converter.py', run_name='__main__')";
-  log(`[233] ${py.cmd} wx_converter.py -s ${wxDir} -t ${targetDir}  (cwd ${conv})`);
+  output += `$ ${py.cmd} wx_converter.py -s ${wxDir} -t ${targetDir}  (cwd ${conv})\n`;
   const r = spawnSync(py.cmd, [...py.args, '-c', code, '-s', wxDir, '-t', targetDir], {
     cwd: conv,
     input: 'y\ny\ny\n',
-    stdio: ['pipe', 'inherit', 'inherit'],
+    encoding: 'utf8',
+    maxBuffer: 64 << 20,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
   });
+  output += outputOf(r);
   const zip = join(targetDir, 'game.zip');
   if (r.status !== 0 || !existsSync(zip)) {
-    return { ok: false, message: `converter failed (exit ${r.status ?? r.signal ?? r.error?.message})` };
+    return finish({ ok: false, message: `converter failed (exit ${r.status ?? r.signal ?? r.error?.message})` });
   }
-  return { ok: true, zip, zipBytes: statSync(zip).size };
+  return finish({ ok: true, zip, zipBytes: statSync(zip).size });
 }

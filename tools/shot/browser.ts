@@ -1,115 +1,22 @@
 /**
  * Screenshot of an app scene in real Chrome (fallback Edge) with mobile emulation, via the web --dev build.
+ * Same options as `pnpm shot` (tools/shot/args.ts); `pnpm shot:browser --help` prints them all.
  *
- *   pnpm shot:browser --scene basics                          -> .shots/browser-basics-iphone-14.png
- *   pnpm shot:browser --scene basics --device iphone-se,ipad --tap "#counter" --tap "#counter" --seconds 1
+ *   pnpm shot:browser --scene play                              -> .shots/browser-play-iphone-14.png
+ *   pnpm shot:browser --app sandbox --scene ui-kit --wait 0.5 --tap "#go" --input touch --lint --bounds
  *
- * Options:
- *   --app <dir>         app directory (default sandbox)
- *   --scene <name>      scene to open (default: the app's start scene)
- *   --params <json>     params for the scene
- *   --device <list>     comma list of device names (engine/testing/devices.ts) or WxH@dpr; 'all' = every profile
- *   --tap <selector>    tap a node through window.__engine (repeatable, in order)
- *   --input <how>       how taps are delivered: engine (default, injected into the platform), touch (real CDP touch
- *                       events at the node center) or mouse (real mouse click; exercises the adapter's DOM input path)
- *   --seconds <n>       wait after setup/taps before the shot (default 0.5)
- *   --out <file>        output path (only with a single device)
- *   --scale css|device  PNG in CSS px (default, same size as `pnpm shot`) or device pixels
- *   --browser <exe>     browser executable (default: CHROME_PATH, system Chrome, then Edge)
- *   --no-insets         do not emulate the device's safe-area insets (default: passed as ?insets=)
- *
- * Prints page console errors/warnings and uncaught exceptions; exits 1 when there were errors.
+ * Prints page console errors/warnings and uncaught exceptions; exits 1 when there were errors (or lint errors
+ * with --lint).
  */
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { chromium, type Browser } from 'playwright-core';
-import { devices, resolveDevice } from '../../engine/testing/devices';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { resolveDevice } from '../../engine/testing/devices';
 import { buildTarget } from '../build/build';
+import type { EngineHandle } from '../build/web-entry';
 import { serveDir } from '../dev/static';
-
-interface Args {
-  app: string;
-  scene?: string;
-  params?: string;
-  devices: string[];
-  taps: string[];
-  input: 'engine' | 'touch' | 'mouse';
-  seconds: number;
-  out?: string;
-  scale: 'css' | 'device';
-  browser?: string;
-  insets: boolean;
-  timeout: number;
-}
-
-function parseArgs(argv: string[]): Args {
-  const a: Args = {
-    app: 'sandbox',
-    devices: ['iphone-14'],
-    taps: [],
-    input: 'engine',
-    seconds: 0.5,
-    scale: 'css',
-    insets: true,
-    timeout: 20,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const k = argv[i]!;
-    const v = () => {
-      const val = argv[++i];
-      if (val === undefined) throw new Error(`missing value for ${k}`);
-      return val;
-    };
-    switch (k) {
-      case '--app':
-        a.app = v();
-        break;
-      case '--scene':
-        a.scene = v();
-        break;
-      case '--params':
-        a.params = v();
-        break;
-      case '--device':
-      case '--devices': {
-        const d = v();
-        a.devices = d === 'all' ? Object.keys(devices) : d.split(',');
-        break;
-      }
-      case '--tap':
-        a.taps.push(v());
-        break;
-      case '--input': {
-        const how = v();
-        if (how !== 'engine' && how !== 'touch' && how !== 'mouse') throw new Error(`--input must be engine|touch|mouse`);
-        a.input = how;
-        break;
-      }
-      case '--seconds':
-        a.seconds = +v();
-        break;
-      case '--out':
-        a.out = v();
-        break;
-      case '--scale':
-        a.scale = v() === 'device' ? 'device' : 'css';
-        break;
-      case '--browser':
-        a.browser = v();
-        break;
-      case '--no-insets':
-        a.insets = false;
-        break;
-      case '--timeout':
-        a.timeout = +v();
-        break;
-      default:
-        throw new Error(`unknown option ${k}`);
-    }
-  }
-  return a;
-}
+import { ActionError, describeAction, exitOnError, formatTarget, shotArgsOrExit, shotFile, type ShotAction, type ShotArgs } from './args';
 
 /** System Chrome, then Edge (Windows, macOS, Linux locations). */
 function findBrowser(explicit?: string): string {
@@ -132,23 +39,68 @@ function findBrowser(explicit?: string): string {
   throw new Error('no Chrome/Edge found: pass --browser <exe> or set CHROME_PATH');
 }
 
-interface EngineWindow {
-  __engine?: {
-    tap(selector: string): Promise<void>;
-    locate(selector: string): { x: number; y: number } | null;
-    frames(n?: number): Promise<void>;
-    dump(): string;
-    scene(): string;
-    game: { view: { width: number; height: number } };
-  };
+type EngineWindow = { __engine?: EngineHandle };
+
+const DRAG_STEPS = 12;
+
+async function locate(page: Page, target: string): Promise<{ x: number; y: number }> {
+  const at = await page.evaluate((s) => (window as EngineWindow).__engine!.locate(s), target);
+  if (at) return at;
+  const dump = await page.evaluate(() => (window as EngineWindow).__engine!.dump());
+  throw new Error(`no node matches "${target}". Stage:\n${dump}`);
+}
+
+const frames = (page: Page, n: number) => page.evaluate((k) => (window as EngineWindow).__engine!.frames(k), n);
+
+/** Runs one --tap/--drag/--wait with the chosen input path. */
+async function runAction(page: Page, context: BrowserContext, act: ShotAction, input: ShotArgs['input']): Promise<void> {
+  if (act.kind === 'wait') return page.waitForTimeout(act.seconds * 1000);
+  if (act.kind === 'tap') {
+    const target = formatTarget(act.target);
+    if (input === 'engine') return page.evaluate((s) => (window as EngineWindow).__engine!.tap(s), target);
+    const at = await locate(page, target);
+    if (input === 'touch') await page.touchscreen.tap(at.x, at.y);
+    else await page.mouse.click(at.x, at.y, { delay: 50 });
+    return frames(page, 2);
+  }
+  const from = formatTarget(act.from);
+  const to = formatTarget(act.to);
+  if (input === 'engine') {
+    return page.evaluate(([f, t, n]) => (window as EngineWindow).__engine!.drag(f, t, n), [from, to, DRAG_STEPS] as const);
+  }
+  const a = await locate(page, from);
+  const b = await locate(page, to);
+  if (input === 'mouse') {
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(b.x, b.y, { steps: DRAG_STEPS });
+    await page.mouse.up();
+    return frames(page, 2);
+  }
+  const cdp = await context.newCDPSession(page);
+  try {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: a.x, y: a.y, id: 1 }] });
+    await frames(page, 1);
+    for (let i = 1; i <= DRAG_STEPS; i++) {
+      const k = i / DRAG_STEPS;
+      const p = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, id: 1 };
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [p] });
+      await frames(page, 1);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await frames(page, 2);
+  } finally {
+    await cdp.detach();
+  }
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = shotArgsOrExit(process.argv.slice(2), 'shot:browser');
   const tmp = mkdtempSync(join(tmpdir(), 'engine-shot-'));
   let browser: Browser | null = null;
   let server: Awaited<ReturnType<typeof serveDir>> | null = null;
   let errors = 0;
+  let lintErrors = 0;
   try {
     const built = await buildTarget('web', { app: args.app, out: tmp, dev: true, log: () => {} });
     if (!built.ok) throw new Error(`web build failed:\n${built.problems.join('\n')}`);
@@ -179,11 +131,12 @@ async function main(): Promise<void> {
 
       const q = new URLSearchParams();
       if (args.scene) q.set('scene', args.scene);
-      if (args.params) q.set('params', args.params);
+      if (args.params !== undefined) q.set('params', JSON.stringify(args.params));
       if (args.insets) {
         const si = dev.safeInsets;
         q.set('insets', `${si.top},${si.right},${si.bottom},${si.left}`);
       }
+      q.set('seed', String(args.seed));
       await page.goto(`${server.url}/?${q}`, { waitUntil: 'load' });
       await page.waitForFunction(
         () => !!(window as EngineWindow).__engine || !!document.getElementById('__engine_error'),
@@ -191,23 +144,18 @@ async function main(): Promise<void> {
         { timeout: args.timeout * 1000 },
       );
       const bootError = await page.evaluate(() => document.getElementById('__engine_error')?.textContent ?? null);
+      const booted = !bootError;
       if (bootError) {
         logs.push(`boot error: ${bootError}`);
         errors++;
       } else {
-        for (const sel of args.taps) {
-          if (args.input === 'engine') {
-            await page.evaluate((s) => (window as EngineWindow).__engine!.tap(s), sel);
-            continue;
+        for (const act of args.actions) {
+          try {
+            await runAction(page, context, act, args.input);
+          } catch (e) {
+            const msg = (e instanceof Error ? e.message : String(e)).replace(/^page\.evaluate: (Error: )?/, '');
+            throw new ActionError(`${describeAction(act)} failed on ${name}: ${msg}`);
           }
-          const at = await page.evaluate((s) => (window as EngineWindow).__engine!.locate(s), sel);
-          if (!at) {
-            const dump = await page.evaluate(() => (window as EngineWindow).__engine!.dump());
-            throw new Error(`no node matches "${sel}". Stage:\n${dump}`);
-          }
-          if (args.input === 'touch') await page.touchscreen.tap(at.x, at.y);
-          else await page.mouse.click(at.x, at.y, { delay: 50 });
-          await page.evaluate(() => (window as EngineWindow).__engine!.frames(2));
         }
       }
       await page.waitForTimeout(args.seconds * 1000);
@@ -216,11 +164,25 @@ async function main(): Promise<void> {
         return e ? { scene: e.scene() || 'none', w: e.game.view.width, h: e.game.view.height } : null;
       });
       const scene = info?.scene ?? args.scene ?? 'error';
-      const file = resolve(args.out && args.devices.length === 1 ? args.out : `.shots/browser-${scene}-${name}.png`);
+      const file = resolve(shotFile('shot:browser', args, scene, name));
       mkdirSync(dirname(file), { recursive: true });
-      await page.screenshot({ path: file, scale: args.scale });
+      await page.screenshot({ path: file, scale: args.scale === 'device' ? 'device' : 'css' });
       const view = info ? `, view=${Math.round(info.w)}x${Math.round(info.h)}` : '';
       console.log(`shot: ${file}  (scene=${scene}, device=${name}${view})`);
+      if (booted && args.bounds) {
+        const boundsFile = file.replace(/(\.png)?$/i, '-bounds.png');
+        await page.evaluate(() => (window as EngineWindow).__engine!.bounds(true));
+        await frames(page, 2);
+        await page.screenshot({ path: boundsFile, scale: args.scale === 'device' ? 'device' : 'css' });
+        await page.evaluate(() => (window as EngineWindow).__engine!.bounds(false));
+        console.log(`bounds: ${boundsFile}`);
+      }
+      if (booted && args.dump) console.log(await page.evaluate(() => (window as EngineWindow).__engine!.dump()));
+      if (booted && args.lint) {
+        const lint = await page.evaluate(() => (window as EngineWindow).__engine!.lint());
+        lintErrors += lint.errors;
+        console.log(`[${name}] ${lint.report}`);
+      }
       for (const l of logs) console.log(`  ${l}`);
       await context.close();
     }
@@ -229,13 +191,8 @@ async function main(): Promise<void> {
     await server?.close();
     rmSync(tmp, { recursive: true, force: true });
   }
-  if (errors) {
-    console.error(`${errors} page error(s)`);
-    process.exit(1);
-  }
+  if (errors) console.error(`${errors} page error(s)`);
+  if (errors || lintErrors) process.exit(1);
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? (e.stack ?? e.message) : e);
-  process.exit(1);
-});
+main().catch(exitOnError);

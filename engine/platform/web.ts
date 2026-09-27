@@ -7,6 +7,8 @@ import type {
   KeyValueStorage,
   LoginResult,
   Platform,
+  PlatformGamepad,
+  PlatformKeyEvent,
   PlayOptions,
   RawTouch,
   RawTouchEvent,
@@ -46,6 +48,15 @@ class Listeners<T> {
 function joinUrl(base: string, path: string): string {
   if (/^([a-z][a-z0-9+.-]*:|\/)/i.test(path)) return path;
   return base + path.replace(/^\.\//, '');
+}
+
+/** Keys whose default action scrolls the page (or a parent page around an iframe). */
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'PageUp', 'PageDown', 'Home', 'End']);
+
+function isEditable(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || typeof el.tagName !== 'string') return false;
+  return el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
 }
 
 // ------------------------------------------------------------------ storage
@@ -317,6 +328,7 @@ export class WebPlatform implements Platform {
   readonly audio: WebAudio;
   readonly ads: AdService;
   readonly element: HTMLCanvasElement;
+  readonly language: string | undefined = typeof navigator !== 'undefined' ? navigator.language || undefined : undefined;
 
   private readonly base: string;
   private readonly probe: HTMLDivElement;
@@ -324,6 +336,9 @@ export class WebPlatform implements Platform {
   private readonly showCbs = new Listeners<void>();
   private readonly hideCbs = new Listeners<void>();
   private readonly resizeCbs = new Listeners<void>();
+  private readonly keyCbs = new Listeners<PlatformKeyEvent>();
+  /** Held keys: code → key. */
+  private readonly heldKeys = new Map<string, string>();
 
   constructor(private readonly opts: WebPlatformOptions = {}) {
     const base = opts.assetBase ?? 'assets/';
@@ -349,6 +364,7 @@ export class WebPlatform implements Platform {
     this.lockPage();
     let last = this.measure();
     this.bindInput();
+    this.bindKeys();
 
     const onResize = () => {
       const next = this.measure();
@@ -421,6 +437,32 @@ export class WebPlatform implements Platform {
     return this.resizeCbs.add(cb);
   }
 
+  onKey(cb: (e: PlatformKeyEvent) => void): () => void {
+    return this.keyCbs.add(cb);
+  }
+
+  pollGamepads(): PlatformGamepad[] {
+    let list: ArrayLike<Gamepad | null> = [];
+    try {
+      list = navigator.getGamepads?.() ?? [];
+    } catch {
+      // blocked by permissions policy / insecure context
+    }
+    const out: PlatformGamepad[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const g = list[i];
+      if (!g || !g.connected) continue;
+      out.push({
+        index: g.index,
+        id: g.id,
+        standard: g.mapping === 'standard',
+        buttons: Array.from(g.buttons, (b) => b.value || (b.pressed ? 1 : 0)),
+        axes: Array.from(g.axes),
+      });
+    }
+    return out;
+  }
+
   vibrate(kind: 'short' | 'long'): void {
     try {
       navigator.vibrate?.(kind === 'short' ? 15 : 400);
@@ -440,6 +482,42 @@ export class WebPlatform implements Platform {
   /** Injects a touch event in screen CSS px, as if it came from the browser (used by automation). */
   simulateTouch(phase: TouchPhase, touches: RawTouch[]): void {
     this.touchCbs.emit({ phase, touches });
+  }
+
+  /** Injects a key event (KeyboardEvent.code), as if it came from the browser (used by automation). */
+  simulateKey(code: string, type: 'down' | 'up' = 'down', key = ''): void {
+    this.emitKey(type, code, key);
+  }
+
+  private emitKey(type: 'down' | 'up', code: string, key: string): void {
+    if (type === 'down') {
+      const repeat = this.heldKeys.has(code);
+      this.heldKeys.set(code, key);
+      this.keyCbs.emit({ type, code, key, repeat });
+    } else if (this.heldKeys.delete(code)) {
+      this.keyCbs.emit({ type, code, key, repeat: false });
+    }
+  }
+
+  private releaseKeys(): void {
+    for (const [code, key] of [...this.heldKeys]) this.emitKey('up', code, key);
+  }
+
+  private bindKeys(): void {
+    window.addEventListener('keydown', (e) => {
+      if (e.isComposing || isEditable(e.target) || !e.code) return;
+      // Only plain presses: Ctrl/Cmd shortcuts and browser keys keep working.
+      if (SCROLL_KEYS.has(e.code) && !e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault();
+      this.emitKey('down', e.code, e.key ?? '');
+    });
+    // Ups are delivered even for editable targets, so a key pressed before focusing an input cannot stick.
+    window.addEventListener('keyup', (e) => {
+      if (e.code) this.emitKey('up', e.code, e.key ?? '');
+    });
+    window.addEventListener('blur', () => this.releaseKeys());
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.releaseKeys();
+    });
   }
 
   /** Updates `screen` and the canvas CSS size; returns a key that changes whenever the screen does. */

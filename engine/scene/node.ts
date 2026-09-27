@@ -82,6 +82,9 @@ const tmpMat = new Mat2D();
  * sorted by zIndex (stable), then drawOver(ctx). Subclasses usually only override draw().
  */
 export class Node {
+  /** Total render() calls that drew (visible nodes) since start; game.stats diffs it per frame. */
+  static renderCount = 0;
+
   readonly uid = nextUid++;
   id = '';
   readonly tags = new Set<string>();
@@ -364,6 +367,7 @@ export class Node {
 
   render(ctx: Ctx2D): void {
     if (!this.visible || this.alpha <= 0 || this.destroyed) return;
+    Node.renderCount++;
     ctx.save();
     const m = this.localMatrix(tmpMat);
     ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);

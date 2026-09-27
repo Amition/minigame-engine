@@ -1,5 +1,5 @@
 import type { Rect } from '../core/math';
-import { Texture } from '../gfx/texture';
+import { Texture, trackTexture } from '../gfx/texture';
 import { textures } from '../gfx/textures';
 import type { ImageSource } from '../gfx/types';
 import { platform } from '../platform/current';
@@ -91,7 +91,10 @@ export function loadImageCached(path: string): Promise<ImageSource> {
   if (!img) {
     img = p.loadImage(path);
     cache.set(path, img);
-    img.catch(() => cache!.delete(path));
+    img.then(
+      (src) => trackTexture(src, path, 'image'),
+      () => cache!.delete(path),
+    );
   }
   return img;
 }

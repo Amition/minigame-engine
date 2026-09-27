@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "pnpm typecheck && pnpm test",
+    "check": "pnpm typecheck && pnpm lint:encoding && pnpm test",
     "shot": "tsx tools/shot/run.ts",
     "shot:browser": "tsx tools/shot/browser.ts",
     "dev": "tsx tools/dev/server.ts",

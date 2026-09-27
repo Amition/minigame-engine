@@ -2,7 +2,13 @@
  * Dev server: esbuild watch + live reload for the web build.
  *
  *   pnpm dev                          -> http://localhost:5173/ (+ LAN URLs for phones on the same Wi-Fi)
- *   pnpm dev --app game --port 8080
+ *   pnpm dev --app sandbox --port 8080
+ *
+ * Options:
+ *   --app <dir>       app directory with main.ts (default: package.json "engine.app", else sandbox)
+ *   --port <n>        port (default 5173; the next free one if taken)
+ *   --host <addr>     interface to listen on (default 0.0.0.0 = LAN reachable)
+ *   --help            print this help
  *
  * Routes:
  *   /                 the game (same URL params as the web build: ?scene=<name>&params=<json>&insets=t,r,b,l)
@@ -19,6 +25,7 @@ import { basename, join } from 'node:path';
 import * as esbuild from 'esbuild';
 import { devices, resolveDevice } from '../../engine/testing/devices';
 import { esbuildOptions, readAppMeta, resolveApp, ROOT } from '../build/config';
+import { defaultApp, exitWithUsage } from '../common/app';
 import { webIndexHtml } from '../build/files';
 import { fileInRoot, listen, send, sendFile } from './static';
 
@@ -29,18 +36,19 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { app: 'sandbox', port: 5173, host: '0.0.0.0' };
+  const a: Args = { app: defaultApp(), port: 5173, host: '0.0.0.0' };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]!;
     const v = () => {
       const val = argv[++i];
-      if (val === undefined) throw new Error(`missing value for ${k}`);
+      if (val === undefined) exitWithUsage(import.meta.url, `missing value for ${k}`);
       return val;
     };
     if (k === '--app') a.app = v();
     else if (k === '--port') a.port = +v();
     else if (k === '--host') a.host = v();
-    else throw new Error(`unknown option ${k}`);
+    else if (k === '--help' || k === '-h') exitWithUsage(import.meta.url);
+    else exitWithUsage(import.meta.url, `unknown option ${k}`);
   }
   return a;
 }

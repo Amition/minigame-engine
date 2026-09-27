@@ -6,10 +6,9 @@ export interface SuikaSave {
   watermelons: number;
 }
 
-let store: SaveStore<SuikaSave> | null = null;
+const store = createSave<SuikaSave>('suika', { best: 0, games: 0, watermelons: 0 });
 
-/** Persistent progress (created on first use, after the platform is set). */
+/** Persistent progress. */
 export function suikaSave(): SaveStore<SuikaSave> {
-  store ??= createSave<SuikaSave>('suika', { best: 0, games: 0, watermelons: 0 });
   return store;
 }

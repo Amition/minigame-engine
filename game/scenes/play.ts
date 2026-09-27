@@ -1,24 +1,30 @@
 import {
-  getAudioManager,
+  canShowAd,
+  fixedUpdate,
+  isAudioMuted,
   mountScreen,
   Node,
+  onAim,
   platform,
+  playSong,
+  playSound,
   popIn,
   punch,
   Scene,
+  setAudioMuted,
   shake,
   showDialog,
   showModal,
+  showRewardedAd,
   showToast,
   spawnParticles,
+  stopSong,
   Text,
   tween,
   ui,
   wait,
   type Label,
-  type PointerEvt,
 } from '@engine';
-import appJson from '../app.json';
 import { FruitNode, type FruitFace } from '../art/fruit-art';
 import { FRUITS, JAR_WIDTH, MAX_LEVEL, fruit } from '../fruits';
 import { SuikaModel, type SuikaEvent } from '../model';
@@ -26,7 +32,6 @@ import type { FruitBody } from '../physics';
 import { suikaSave } from '../save';
 import { AimGuide, Backdrop, DangerLine, Ring } from './play-view';
 
-const STEP = 1 / 60;
 /** Jar-local y of the danger line. */
 const DANGER_Y = 210;
 const HUD_H = 190;
@@ -53,12 +58,11 @@ export class PlayScene extends Scene {
   private bestLabel!: Label;
   private nextSlot!: Node;
   private nextFruit: FruitNode | null = null;
-  private aimPointer: number | null = null;
+  private aiming = false;
   private halted = false;
   private revived = false;
   private best = 0;
   private time = 0;
-  private acc = 0;
   private warnTimer = 0;
 
   override get kind(): string {
@@ -82,14 +86,31 @@ export class PlayScene extends Scene {
     backdrop.jar = { x: jarX, y: jarTop, w: JAR_WIDTH, h: jarH };
 
     const zone = this.add(new Node({ id: 'touch-zone', x: 0, y: jarTop - 120, width: this.width, height: this.height - jarTop + 120 }));
-    zone.interactive = true;
     zone.tags.add('lint-surface');
-    zone.on('pointerdown', (e) => this.onPointer(e));
-    zone.on('pointermove', (e) => this.onPointer(e));
-    zone.on('pointerup', (e) => this.onPointer(e));
-    zone.on('pointercancel', (e) => this.onPointer(e));
 
     this.jar = this.add(new Node({ id: 'jar', x: jarX, y: jarTop, width: JAR_WIDTH, height: jarH }));
+    onAim(
+      zone,
+      {
+        start: (a) => {
+          this.aiming = true;
+          this.model.setAim(a.x);
+        },
+        move: (a) => this.model.setAim(a.x),
+        release: (a) => {
+          this.aiming = false;
+          this.model.setAim(a.x);
+          this.model.drop();
+        },
+        cancel: () => {
+          this.aiming = false;
+        },
+      },
+      { space: this.jar, enabled: () => !this.halted && this.model.state === 'playing' },
+    );
+    fixedUpdate(this, 60, (step) => {
+      if (!this.halted) this.handle(this.model.step(step));
+    });
     this.line = this.jar.add(new DangerLine(JAR_WIDTH, { id: 'danger-line', y: DANGER_Y - 4 }));
     this.guide = this.jar.add(new AimGuide({ id: 'guide' }));
     this.fruitLayer = this.jar.add(new Node({ id: 'fruits' }));
@@ -98,7 +119,7 @@ export class PlayScene extends Scene {
     this.buildHud();
     this.showHeld();
     this.updateNext();
-    getAudioManager(g)?.playMusic('bgm', { fadeMs: 1200 });
+    playSong('bgm', { fadeMs: 1200 });
   }
 
   override onExit(): void {
@@ -123,7 +144,7 @@ export class PlayScene extends Scene {
         ui.iconButton({ id: 'pause', icon: 'pause', label: '暂停', variant: 'primary', onTap: () => this.openPause() }),
       ]),
     ]);
-    mountScreen(this.add(new Node({ id: 'hud', width: this.width, height: this.height })), hud, { safeArea: true });
+    mountScreen(this.add(new Node({ id: 'hud', width: this.width, height: this.height })), hud);
   }
 
   private updateNext(): void {
@@ -141,41 +162,14 @@ export class PlayScene extends Scene {
     if (this.model.score > this.best) this.bestLabel.text = `最高分 ${this.model.score}`;
   }
 
-  // ---------------------------------------------------------------- input
-
-  private onPointer(e: PointerEvt): void {
-    if (this.halted || this.model.state !== 'playing') return;
-    if (e.phase === 'down') {
-      if (this.aimPointer !== null) return;
-      this.aimPointer = e.pointerId;
-    } else if (e.pointerId !== this.aimPointer) {
-      return;
-    }
-    this.model.setAim(this.jar.toLocal(e.x, e.y).x);
-    if (e.phase === 'up') {
-      this.aimPointer = null;
-      this.model.drop();
-    } else if (e.phase === 'cancel') {
-      this.aimPointer = null;
-    }
-  }
-
   // ---------------------------------------------------------------- simulation
 
   override update(dt: number): void {
     this.time += dt;
-    if (!this.halted) {
-      this.acc = Math.min(this.acc + dt, STEP * 5);
-      while (this.acc >= STEP) {
-        this.acc -= STEP;
-        this.handle(this.model.step(STEP));
-      }
-    }
     this.sync(dt);
   }
 
   private handle(events: SuikaEvent[]): void {
-    const audio = getAudioManager(this.game);
     for (const e of events) {
       switch (e.type) {
         case 'drop': {
@@ -183,13 +177,13 @@ export class PlayScene extends Scene {
           this.held = null;
           if (n.parent !== this.fruitLayer) this.fruitLayer.add(n);
           this.nodes.set(e.body, n);
-          audio?.playSfx('drop');
+          playSound('drop');
           break;
         }
         case 'spawn':
           this.showHeld();
           this.updateNext();
-          audio?.playSfx('spawn', { volume: 0.6 });
+          playSound('spawn', { volume: 0.6 });
           break;
         case 'merge':
           this.onMerge(e);
@@ -241,7 +235,7 @@ export class PlayScene extends Scene {
       this.guide.x = m.aimX;
       this.guide.y = top + 10;
       this.guide.height = Math.max(0, this.jar.height - top - 10);
-      this.guide.strength = this.aimPointer !== null ? 1 : 0.35;
+      this.guide.strength = this.aiming ? 1 : 0.35;
     } else {
       this.guide.visible = false;
     }
@@ -250,7 +244,7 @@ export class PlayScene extends Scene {
       this.warnTimer -= dt;
       if (this.warnTimer <= 0) {
         this.warnTimer = 0.5;
-        getAudioManager(this.game)?.playSfx('warning', { volume: 0.7 });
+        playSound('warning', { volume: 0.7 });
       }
     } else {
       this.line.alert = over ? 1 : 0;
@@ -261,7 +255,6 @@ export class PlayScene extends Scene {
   // ---------------------------------------------------------------- merges
 
   private onMerge(e: Extract<SuikaEvent, { type: 'merge' }>): void {
-    const audio = getAudioManager(this.game);
     for (const b of [e.a, e.b]) {
       this.nodes.get(b)?.destroy();
       this.nodes.delete(b);
@@ -280,10 +273,10 @@ export class PlayScene extends Scene {
     this.popup(`+${e.points}`, e.x, e.y - shown.radius * 0.3, 34 + Math.min(24, e.level * 3), '#ffffff', '#d9480f');
     if (e.combo >= 2) {
       this.popup(`连击 ×${e.combo}`, e.x, e.y - shown.radius * 0.3 - 56, 34, '#fff3b0', '#b45309');
-      audio?.playSfx('combo', { rate: Math.min(1.5, 1 + 0.08 * (e.combo - 2)) });
+      playSound('combo', { rate: Math.min(1.5, 1 + 0.08 * (e.combo - 2)) });
     }
-    audio?.playSfx('merge', { rate: 1.25 - Math.min(e.level, 10) * 0.05 });
-    if (e.level >= 7) audio?.playSfx('merge-big');
+    playSound('merge', { rate: 1.25 - Math.min(e.level, 10) * 0.05 });
+    if (e.level >= 7) playSound('merge-big');
     if (e.level >= 8) shake(this.jar, 6 + e.level, 0.35);
     if (e.level === MAX_LEVEL) this.celebrate();
     this.setScore();
@@ -332,7 +325,7 @@ export class PlayScene extends Scene {
   private celebrate(): void {
     const save = suikaSave();
     save.set({ watermelons: save.data.watermelons + 1 });
-    getAudioManager(this.game)?.playSfx('watermelon');
+    playSound('watermelon');
     spawnParticles(this.fxLayer, 'confetti', { x: JAR_WIDTH / 2, y: DANGER_Y });
     const t = this.fxLayer.add(
       new Text('合成大西瓜！', { fontSize: 88, fontWeight: 'bold', color: '#ffffff', stroke: { color: '#2f9e44', width: 14 } }, {
@@ -351,36 +344,34 @@ export class PlayScene extends Scene {
 
   private openPause(): void {
     if (this.halted || this.model.state !== 'playing') return;
-    const audio = getAudioManager(this.game);
-    audio?.playSfx('click');
+    playSound('click');
     this.halted = true;
     const modal = showModal({ title: '暂停', closeButton: false, closeOnBackdrop: false }, [
       ui.row({ justify: 'between', align: 'center', width: 440 }, [
         ui.text('音效', { variant: 'body' }),
-        ui.toggle({ id: 'sfx-toggle', value: !(audio?.isMuted('sfx') ?? false), onChange: (on) => audio?.setMuted('sfx', !on) }),
+        ui.toggle({ id: 'sfx-toggle', value: !isAudioMuted('sfx'), onChange: (on) => setAudioMuted('sfx', !on) }),
       ]),
       ui.row({ justify: 'between', align: 'center', width: 440 }, [
         ui.text('音乐', { variant: 'body' }),
-        ui.toggle({ id: 'music-toggle', value: !(audio?.isMuted('music') ?? false), onChange: (on) => audio?.setMuted('music', !on) }),
+        ui.toggle({ id: 'music-toggle', value: !isAudioMuted('music'), onChange: (on) => setAudioMuted('music', !on) }),
       ]),
       ui.button({ id: 'resume', text: '继续游戏', variant: 'success', size: 'lg', width: 440, onTap: () => modal.close('resume') }),
       ui.button({ id: 'restart', text: '重新开始', variant: 'secondary', size: 'lg', width: 440, onTap: () => modal.close('restart') }),
     ]);
     void modal.closed.then((r) => {
-      audio?.playSfx('click');
+      playSound('click');
       if (r === 'restart') this.restart();
       else this.halted = false;
     });
   }
 
   private restart(): void {
-    void this.game.scenes.go('play', undefined, { transition: 'fade', duration: 0.3 });
+    void this.game.scenes.restart({ transition: 'fade', duration: 0.3 });
   }
 
   private async onGameOver(): Promise<void> {
-    const audio = getAudioManager(this.game);
-    audio?.stopMusic(600);
-    audio?.playSfx('gameover');
+    stopSong(600);
+    playSound('gameover');
     this.held?.destroy();
     this.held = null;
     const save = suikaSave();
@@ -389,9 +380,8 @@ export class PlayScene extends Scene {
     save.set({ best: Math.max(score, save.data.best), games: save.data.games + (this.revived ? 0 : 1) });
     save.flush();
     await wait(1.2, { owner: this });
-    if (record && score > 0) audio?.playSfx('record');
-    const adUnit = (appJson.ads as Record<string, { rewarded: string }>)[platform().name]?.rewarded ?? '';
-    const canRevive = !this.revived && (adUnit !== '' || platform().name === 'web' || platform().name === 'headless');
+    if (record && score > 0) playSound('record');
+    const canRevive = !this.revived && canShowAd('rewarded');
     const buttons = [
       ...(canRevive ? [{ id: 'revive', text: '看广告复活', action: 'revive', variant: 'secondary' as const, icon: 'play' }] : []),
       { id: 'again', text: '再来一局', action: 'again', variant: 'success' as const },
@@ -407,10 +397,9 @@ export class PlayScene extends Scene {
       ui.text(`最大水果：${FRUITS[this.model.bestLevel]!.name}`, { variant: 'body', align: 'center', color: 'textDim' }),
     ]);
     const r = await dialog.closed;
-    audio?.playSfx('click');
+    playSound('click');
     if (r === 'revive') {
-      const ok = await platform().ads.rewarded(adUnit);
-      if (ok) {
+      if (await showRewardedAd('rewarded')) {
         this.revive();
         return;
       }
@@ -429,7 +418,7 @@ export class PlayScene extends Scene {
       }
       this.nodes.delete(b);
     }
-    getAudioManager(this.game)?.playMusic('bgm', { fadeMs: 800 });
+    playSong('bgm', { fadeMs: 800 });
     this.showHeld();
   }
 }

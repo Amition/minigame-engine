@@ -3,24 +3,28 @@
  *
  *   pnpm build:wx                               -> dist/wx  (game.js, game.json, project.config.json, assets/)
  *   pnpm build --target all --minify            -> dist/{web,wx,tt,tap,233} + dist/tap.zip
- *   pnpm build --target web --app game --out out --dev
+ *   pnpm build --target web --app sandbox --out out --dev
  *
  * Options:
  *   --target <t>   web | wx | tt | tap | 233 | all (default web); comma lists allowed (web,wx)
- *   --app <dir>    app directory with main.ts (default export: AppDef) and app.json (default sandbox)
+ *   --app <dir>    app directory with main.ts (default export: AppDef) and app.json
+ *                  (default: package.json "engine.app", else sandbox)
  *   --out <dir>    output root (default dist); each target goes to <out>/<target>
  *   --minify       minify game.js
  *   --dev          dev build: sourcemap, window.__engine automation handle + error overlay (web)
+ *   --help         print this help
  *
  * Outputs: web → index.html + game.js; wx → + game.json/project.config.json; tt → Douyin's game.js/game.json/
  * project.config.json; tap → game.js/game.json + <out>/tap.zip (upload); 233 → wx build converted by
- * wx_converter.py into <out>/233/game.zip. Fails when the wx/tt package exceeds 4 MB or game.js references node.
+ * wx_converter.py into <out>/233/game.zip (converter log: <out>/233/convert.log). Fails when the wx/tt package
+ * exceeds 4 MB or game.js references node.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
+import { defaultApp, exitWithUsage } from '../common/app';
 import { type AppMeta, type BundleTarget, esbuildOptions, findNodeImports, readAppMeta, resolveApp } from './config';
 import { convert233 } from './convert233';
 import {
@@ -37,7 +41,7 @@ export type Target = BundleTarget | '233';
 export const TARGETS: readonly Target[] = ['web', 'wx', 'tt', 'tap', '233'];
 
 export interface BuildOptions {
-  /** App dir (default 'sandbox'). */
+  /** App dir (default: defaultApp(), i.e. package.json "engine.app", else 'sandbox'). */
   app?: string;
   /** Output root (default 'dist'). */
   out?: string;
@@ -103,7 +107,7 @@ export async function bundle(
 
 /** Builds one target. Never throws for build errors: check `ok` / `problems`. */
 export async function buildTarget(target: Target, opts: BuildOptions = {}): Promise<BuildResult> {
-  const appDir = resolveApp(opts.app ?? 'sandbox');
+  const appDir = resolveApp(opts.app ?? defaultApp());
   const out = resolve(opts.out ?? 'dist');
   const dev = !!opts.dev;
   const minify = !!opts.minify;
@@ -114,7 +118,8 @@ export async function buildTarget(target: Target, opts: BuildOptions = {}): Prom
     const dir = join(out, '233');
     const tmp = mkdtempSync(join(tmpdir(), 'engine-233-'));
     try {
-      const wx = await buildTarget('wx', { ...opts, app: appDir, out: tmp, log });
+      log(`[build] 233 -> ${relative(process.cwd(), dir) || dir} (wx build + converter)`);
+      const wx = await buildTarget('wx', { ...opts, app: appDir, out: tmp, log: () => {} });
       if (!wx.ok) return { ...wx, target, dir };
       const c = convert233(wx.dir, dir, log);
       const base = { target, dir, warnings: wx.warnings, ...(wx.size ? { size: wx.size } : {}) };
@@ -216,13 +221,19 @@ function parseArgs(argv: string[]): CliArgs {
     else if (k === '--out') a.out = v();
     else if (k === '--minify') a.minify = true;
     else if (k === '--dev') a.dev = true;
+    else if (k === '--help' || k === '-h') exitWithUsage(import.meta.url);
     else throw new Error(`unknown option ${k}`);
   }
   return a;
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  let args: CliArgs;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    exitWithUsage(import.meta.url, e instanceof Error ? e.message : String(e));
+  }
   const t0 = Date.now();
   const results = await buildTargets(args.targets, args);
   console.log('');

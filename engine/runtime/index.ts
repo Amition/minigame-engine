@@ -3,6 +3,7 @@ export * from './ease';
 export * from './tween';
 export * from './timers';
 export * from './juice';
+export * from './spring';
 export * from './gestures';
 export * from './joystick';
 export * from './assets';

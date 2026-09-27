@@ -326,3 +326,148 @@ export function pinch(target: Node | Game, fn: (e: PinchEvent) => void, opts: { 
   opts.owner?.once('destroyed', off);
   return off;
 }
+
+// ---------------------------------------------------------------- aim
+
+export interface AimInfo {
+  /** The pointer event behind this update. */
+  pointer: PointerEvt;
+  /** Current position in the `space` node's local coordinates (stage coordinates without a space). */
+  x: number;
+  y: number;
+  /** Current position in stage coordinates. */
+  stageX: number;
+  stageY: number;
+  /** Where the press started, `space` coordinates. */
+  startX: number;
+  startY: number;
+  /** Drag vector from the start, clamped to maxDistance (`space` units). A slingshot fires along (-dx, -dy). */
+  dx: number;
+  dy: number;
+  /** Length of (dx, dy). */
+  distance: number;
+  /** Direction of (dx, dy) in radians (atan2; 0 = right, PI / 2 = down); 0 before any movement. */
+  angle: number;
+  /** Seconds since the press (real time). */
+  duration: number;
+  /** Velocity over the last ~0.1 s (`space` units per second): flick strength on release. */
+  vx: number;
+  vy: number;
+}
+
+export interface AimHandlers {
+  /** The first pointer pressed on the zone (others are ignored until it is released). */
+  start?: (a: AimInfo) => void;
+  move?: (a: AimInfo) => void;
+  /** The aiming pointer was lifted: fire. */
+  release?: (a: AimInfo) => void;
+  /** pointercancel, or the gesture got disabled / its owner paused while aiming (seen at the next pointer event). */
+  cancel?: (a: AimInfo) => void;
+}
+
+export interface AimOptions {
+  /** Node whose local space x / y / dx / dy use (e.g. the playfield). Default: the zone node; stage for a Game zone. */
+  space?: Node | null;
+  /** Ignored while this node's subtree is paused; removed when it is destroyed. Default: the zone node. */
+  owner?: Node | null;
+  /** Clamp for the drag vector (slingshot pull limit), `space` units. */
+  maxDistance?: number;
+  /** Checked on press and on every later event: return false to ignore presses and cancel a running aim. */
+  enabled?: () => boolean;
+}
+
+/**
+ * Press, slide to aim, release to fire (drop position, slingshot, pool cue, basketball flick). The first pointer that
+ * presses the zone (a node, or the whole stage when given the game) is captured: its moves keep coming even outside
+ * the zone, other pointers are ignored until it is released. Returns a remover.
+ *
+ *     onAim(zone, {
+ *       move: (a) => model.setAim(a.x),
+ *       release: (a) => model.drop(),
+ *     }, { space: jar, enabled: () => model.state === 'playing' });
+ *     onAim(zone, { release: (a) => launch(-a.dx * 6, -a.dy * 6) }, { maxDistance: 220 }); // slingshot
+ *
+ * A zone covering the playfield under other controls should get `tags: ['lint-surface']`.
+ */
+export function onAim(zone: Node | Game, handlers: AimHandlers, opts: AimOptions = {}): () => void {
+  const game = gameOf(zone);
+  const node = zone instanceof Game ? null : zone;
+  const owner = opts.owner !== undefined ? opts.owner : node;
+  const space = opts.space !== undefined ? opts.space : node;
+  const max = opts.maxDistance ?? Infinity;
+  let id = -1;
+  let t0 = 0;
+  let sx = 0;
+  let sy = 0;
+  let samples: { t: number; x: number; y: number }[] = [];
+  const blocked = () => (!!owner && isTreePaused(owner)) || (!!opts.enabled && !opts.enabled());
+  const toSpace = (e: PointerEvt): Vec2 => (space ? space.toLocal(e.x, e.y) : { x: e.x, y: e.y });
+  const info = (e: PointerEvt): AimInfo => {
+    const p = toSpace(e);
+    const now = game.time.realElapsed;
+    samples.push({ t: now, x: p.x, y: p.y });
+    while (samples.length > 2 && now - samples[1]!.t >= 0.1) samples.shift();
+    const first = samples[0]!;
+    const span = now - first.t;
+    let dx = p.x - sx;
+    let dy = p.y - sy;
+    let distance = Math.hypot(dx, dy);
+    if (distance > max) {
+      dx *= max / distance;
+      dy *= max / distance;
+      distance = max;
+    }
+    return {
+      pointer: e,
+      x: p.x,
+      y: p.y,
+      stageX: e.x,
+      stageY: e.y,
+      startX: sx,
+      startY: sy,
+      dx,
+      dy,
+      distance,
+      angle: distance > 0 ? Math.atan2(dy, dx) : 0,
+      duration: now - t0,
+      vx: span > 1e-6 ? (p.x - first.x) / span : 0,
+      vy: span > 1e-6 ? (p.y - first.y) / span : 0,
+    };
+  };
+  const cancel = (e: PointerEvt) => {
+    const a = info(e);
+    id = -1;
+    handlers.cancel?.(a);
+  };
+  const offs = [
+    listen(zone, 'pointerdown', (e) => {
+      if (id >= 0 || blocked()) return;
+      id = e.pointerId;
+      t0 = game.time.realElapsed;
+      const p = toSpace(e);
+      sx = p.x;
+      sy = p.y;
+      samples = [];
+      handlers.start?.(info(e));
+    }),
+    listen(zone, 'pointermove', (e) => {
+      if (e.pointerId !== id) return;
+      if (blocked()) cancel(e);
+      else handlers.move?.(info(e));
+    }),
+    listen(zone, 'pointerup', (e) => {
+      if (e.pointerId !== id) return;
+      if (blocked()) return cancel(e);
+      const a = info(e);
+      id = -1;
+      handlers.release?.(a);
+    }),
+    listen(zone, 'pointercancel', (e) => void (e.pointerId === id && cancel(e))),
+  ];
+  const off = () => {
+    id = -1;
+    for (const o of offs) o();
+  };
+  owner?.once('destroyed', off);
+  return off;
+}

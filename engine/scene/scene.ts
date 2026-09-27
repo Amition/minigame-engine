@@ -52,6 +52,11 @@ export interface TransitionOptions {
   duration?: number;
 }
 
+export interface SceneRestartOptions extends TransitionOptions {
+  /** New params for onEnter; when the key is absent the params of the last go()/restart() are reused. */
+  params?: unknown;
+}
+
 /** Built-in transitions by name. */
 export const sceneTransitions: Record<Exclude<TransitionName, 'none'>, TransitionFn> = {
   fade: (t, inc) => {
@@ -130,6 +135,7 @@ export class SceneManager {
   defaultTransition: TransitionOptions = { transition: 'none' };
   private factories = new Map<string, SceneFactory>();
   private _current: Scene | null = null;
+  private _params: unknown = undefined;
   private overlays: Overlay[] = [];
   private covered = new Map<Scene, { paused: boolean; interactiveChildren: boolean }>();
   private active: ActiveTransition | null = null;
@@ -150,6 +156,11 @@ export class SceneManager {
 
   get currentName(): string {
     return this._current?.sceneName ?? '';
+  }
+
+  /** Params the current base scene was entered with (what restart() reuses). */
+  get currentParams(): unknown {
+    return this._params;
   }
 
   /** Topmost scene: the last pushed one, else current. */
@@ -196,6 +207,21 @@ export class SceneManager {
   go(name: string, params?: unknown, opts?: TransitionOptions): Promise<Scene> {
     return new Promise<Scene>((resolve, reject) => {
       this.enqueue(() => this.doGo(name, params, opts, resolve)).catch(reject);
+    });
+  }
+
+  /**
+   * Re-enters the current base scene as a fresh instance (closing pushed scenes, like go()) with the params it was
+   * entered with, or `opts.params`: `scenes.restart({ transition: 'fade', duration: 0.3 })`. The scene is looked up
+   * when the queued operation runs, so `go('b'); restart()` restarts 'b'. Rejects when there is no current scene.
+   */
+  restart(opts: SceneRestartOptions = {}): Promise<Scene> {
+    return new Promise<Scene>((resolve, reject) => {
+      this.enqueue(async () => {
+        const cur = this._current;
+        if (!cur) throw new Error('restart(): no current scene (open one with go() first)');
+        await this.doGo(cur.sceneName, 'params' in opts ? opts.params : this._params, opts, resolve);
+      }).catch(reject);
     });
   }
 
@@ -296,6 +322,7 @@ export class SceneManager {
       }
       const scene = this.create(name, factory);
       this._current = scene;
+      this._params = params;
       this.layer.add(scene);
       scene.onResize(scene.width, scene.height);
       await scene.onEnter(params);
@@ -312,6 +339,7 @@ export class SceneManager {
         old.interactiveChildren = false;
       }
       this._current = scene;
+      this._params = params;
       this.layer.add(scene);
       scene.onResize(scene.width, scene.height);
       const anim = this.prepare(tr, scene, old, false);

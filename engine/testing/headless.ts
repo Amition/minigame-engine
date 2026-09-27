@@ -10,6 +10,7 @@ import type {
   KeyValueStorage,
   LoginResult,
   Platform,
+  PlatformKeyEvent,
   PlayOptions,
   RawTouch,
   RawTouchEvent,
@@ -26,6 +27,8 @@ export interface HeadlessOptions {
   /** Absolute dir that asset paths resolve against. */
   assetsDir?: string;
   fontFamily?: string;
+  /** System language (default 'zh-CN'). */
+  language?: string;
 }
 
 export const HEADLESS_FONT = '"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC",sans-serif';
@@ -130,6 +133,8 @@ export class HeadlessPlatform implements Platform {
   readonly shares: ShareOptions[] = [];
   loginResult: LoginResult = { ok: true, code: 'headless-code' };
   assetsDir: string;
+  /** System language seen by the game; tests may change it before calling detectLocale(). */
+  language: string;
   clock = 0;
 
   private frameCbs = new Map<number, (t: number) => void>();
@@ -138,6 +143,8 @@ export class HeadlessPlatform implements Platform {
   private showCbs = new Set<() => void>();
   private hideCbs = new Set<() => void>();
   private resizeCbs = new Set<() => void>();
+  private keyCbs = new Set<(e: PlatformKeyEvent) => void>();
+  private keysDown = new Set<string>();
 
   constructor(opts: HeadlessOptions = {}) {
     const si = opts.safeInsets ?? {};
@@ -152,6 +159,7 @@ export class HeadlessPlatform implements Platform {
       this.screen.height * this.screen.pixelRatio,
     ) as unknown as Surface;
     this.fontFamily = opts.fontFamily ?? HEADLESS_FONT;
+    this.language = opts.language ?? 'zh-CN';
     this.assetsDir = opts.assetsDir ?? resolve('assets');
     this.audio = new RecordingAudio(() => this.clock);
     const calls: string[] = [];
@@ -222,6 +230,11 @@ export class HeadlessPlatform implements Platform {
     return () => this.resizeCbs.delete(cb);
   }
 
+  onKey(cb: (e: PlatformKeyEvent) => void): () => void {
+    this.keyCbs.add(cb);
+    return () => this.keyCbs.delete(cb);
+  }
+
   vibrate(kind: 'short' | 'long'): void {
     this.vibrations.push(kind);
   }
@@ -240,6 +253,19 @@ export class HeadlessPlatform implements Platform {
   touch(phase: TouchPhase, touches: RawTouch[]): void {
     const e: RawTouchEvent = { phase, touches };
     for (const cb of [...this.touchCbs]) cb(e);
+  }
+
+  /**
+   * Injects a key event (KeyboardEvent.code, e.g. 'Space', 'KeyA'); a 'down' for a held key is a repeat, an 'up'
+   * for a key that is not held is dropped. Edges show up in the next frame: `t.platform.key('Space'); await t.step();`
+   */
+  key(code: string, type: 'down' | 'up' = 'down', key?: string): void {
+    if (type === 'up' && !this.keysDown.delete(code)) return;
+    const repeat = type === 'down' && this.keysDown.has(code);
+    if (type === 'down') this.keysDown.add(code);
+    key ??= /^Key[A-Z]$/.test(code) ? code.slice(3).toLowerCase() : code === 'Space' ? ' ' : code;
+    const e: PlatformKeyEvent = { type, code, key, repeat };
+    for (const cb of [...this.keyCbs]) cb(e);
   }
 
   hide(): void {

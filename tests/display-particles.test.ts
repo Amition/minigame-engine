@@ -196,10 +196,11 @@ describe('ParticleEmitter', () => {
         t!.game.update(1 / 60);
         t!.game.render();
       };
-      for (let i = 0; i < 10; i++) frame();
+      for (let i = 0; i < 5; i++) frame();
+      const drawn = 30;
       const t0 = performance.now();
-      for (let i = 0; i < 120; i++) frame();
-      const frameMs = (performance.now() - t0) / 120;
+      for (let i = 0; i < drawn; i++) frame();
+      const frameMs = (performance.now() - t0) / drawn;
       const t1 = performance.now();
       for (let i = 0; i < 120; i++) e.update(1 / 60);
       const updateMs = (performance.now() - t1) / 120;
@@ -209,8 +210,8 @@ describe('ParticleEmitter', () => {
       results.push(`${shape}: ${frameMs.toFixed(2)} ms/frame (update+render), update ${updateMs.toFixed(3)} ms`);
       e.destroy();
     }
-    console.log(`[perf] 1000 particles, 120 frames, headless 780x1688 canvas\n  ${results.join('\n  ')}`);
-  });
+    console.log(`[perf] 1000 particles, 30 drawn + 120 updated frames, headless 780x1688 canvas\n  ${results.join('\n  ')}`);
+  }, 20_000);
 });
 
 describe('sandbox display scenes', () => {

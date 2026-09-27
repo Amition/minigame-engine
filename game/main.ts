@@ -1,4 +1,5 @@
-import { createAudioManager, defineApp, setUITheme } from '@engine';
+import { autoTextureResolution, configureAds, createAudioManager, defineApp, setUITheme } from '@engine';
+import appJson from './app.json';
 import { bakeFruitArt } from './art/fruit-art';
 import { music, sfx } from './audio/index';
 import { GalleryScene } from './scenes/gallery';
@@ -17,7 +18,8 @@ export default defineApp({
   start: 'title',
   boot(game) {
     setUITheme('light');
-    bakeFruitArt(2);
+    configureAds(appJson.ads);
+    bakeFruitArt(autoTextureResolution());
     createAudioManager(game, { library: { sfx, music } });
   },
 });

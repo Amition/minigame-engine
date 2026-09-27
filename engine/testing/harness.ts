@@ -7,11 +7,24 @@ import type { Vec2 } from '../core/math';
 import { rng } from '../core/rng';
 import type { Ctx2D } from '../gfx/types';
 import { setPlatform } from '../platform/current';
+import { reloadAllSaves } from '../runtime/save';
 import { dumpTree, type DumpOptions } from '../scene/dump';
 import type { Node } from '../scene/node';
 import type { Scene } from '../scene/scene';
+import { isUIHost, layoutUIRoot, uiLayoutNeeded } from '../ui/layout';
+import { darkUITheme, setUITheme, uiTheme } from '../ui/theme';
 import { resolveDevice, type DeviceName, type DeviceSpec } from './devices';
 import { HeadlessPlatform } from './headless';
+
+/**
+ * Which frames step()/advance()/tap()/press()/drag()/go() draw:
+ * - 'last' (default): only the final frame of each call (a 36 s advance() draws 1 frame, not 2160)
+ * - 'every': every frame, like the real game loop
+ * - 'none': never; screenshot()/png() still draw
+ * Frames that are not drawn still emit prerender/postrender and lay out the visible UI, so node positions,
+ * hit tests and render-driven logic (AudioManager fades) are the same in every mode.
+ */
+export type TestRenderMode = 'every' | 'last' | 'none';
 
 export interface TestGameOptions {
   /** Boots this app (scenes, boot(), start scene). Its config provides design/scaleMode/background. */
@@ -26,6 +39,10 @@ export interface TestGameOptions {
   /** Scene to open after boot (overrides app.start). */
   scene?: string;
   params?: unknown;
+  /** Which frames get drawn (default 'last'); see TestRenderMode. Changeable later via `t.renderMode`. */
+  render?: TestRenderMode;
+  /** Backing-store pixel ratio, overriding the device's (usually 2). 1 draws 4x fewer pixels: faster, softer shots. */
+  pixelRatio?: number;
 }
 
 export interface ScreenshotOptions {
@@ -42,7 +59,12 @@ export interface TestGame {
   readonly platform: HeadlessPlatform;
   readonly stage: Node;
   readonly scene: Scene | null;
-  /** Advances `frames` frames of `dt` seconds (update + render), letting pending promises settle between frames. */
+  /** Which frames step()/advance()/... draw; starts as `opts.render` (default 'last'). */
+  renderMode: TestRenderMode;
+  /**
+   * Advances `frames` frames of `dt` seconds (dt clamped to maxDt like game.step), letting pending promises settle
+   * between frames. Drawing follows `renderMode`.
+   */
   step(frames?: number, dt?: number): Promise<void>;
   /** Advances simulated time by `seconds` in 1/60 steps. */
   advance(seconds: number): Promise<void>;
@@ -59,9 +81,9 @@ export interface TestGame {
   drag(from: TapTarget, to: TapTarget, steps?: number): Promise<void>;
   /** Text outline of the stage (or a subtree). */
   dump(opts?: DumpOptions & { root?: Node }): string;
-  /** Renders a frame and writes a PNG. Returns the absolute path. */
+  /** Renders a frame (in every render mode) and writes a PNG. Returns the absolute path. */
   screenshot(file: string, opts?: ScreenshotOptions): Promise<string>;
-  /** Renders a frame and returns PNG bytes. */
+  /** Renders a frame (in every render mode) and returns PNG bytes. */
   png(opts?: ScreenshotOptions): Buffer;
   /** Sound keys played so far. */
   played(): string[];
@@ -70,8 +92,17 @@ export interface TestGame {
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 
+/** The UI layout pass that UIView.render() runs for the visible tree, without drawing anything. */
+function layoutVisibleUI(n: Node): void {
+  if (!n.visible || n.alpha <= 0 || n.destroyed) return;
+  if (isUIHost(n) && !isUIHost(n.parent) && uiLayoutNeeded(n)) layoutUIRoot(n);
+  for (const c of n.children) layoutVisibleUI(c);
+}
+
 /**
  * Creates a headless game for tests and tools. Nothing runs automatically: call step()/advance().
+ * Each call starts from a clean slate: fresh platform storage (SaveStores re-read it), rng reseeded,
+ * default UI theme.
  *
  *     const t = await createTestGame({ app, scene: 'menu' });
  *     await t.tap('Button[text=开始]');
@@ -80,26 +111,40 @@ const flush = () => new Promise<void>((r) => setImmediate(r));
  */
 export async function createTestGame(opts: TestGameOptions = {}): Promise<TestGame> {
   const dev = resolveDevice(opts.device);
+  const pixelRatio = opts.pixelRatio ?? dev.pixelRatio;
   const platform = new HeadlessPlatform({
     width: dev.width,
     height: dev.height,
-    pixelRatio: dev.pixelRatio,
+    pixelRatio,
     safeInsets: dev.safeInsets,
     ...(opts.assetsDir ? { assetsDir: opts.assetsDir } : {}),
   });
   setPlatform(platform);
+  reloadAllSaves();
+  if (uiTheme() !== darkUITheme) setUITheme(darkUITheme);
   rng.seed(opts.seed ?? 1);
   const cfg: GameConfig = opts.app ?? { design: { width: 750, height: 1334 }, ...opts.config };
-  const game = new Game(platform, { ...cfg, maxPixelRatio: dev.pixelRatio });
+  const game = new Game(platform, { ...cfg, maxPixelRatio: pixelRatio });
+  const ctx = platform.canvas.getContext('2d');
   const dt60 = 1 / 60;
+  let renderMode: TestRenderMode = opts.render ?? 'last';
 
-  const step = async (frames = 1, dt = dt60) => {
+  /** Runs frames; in 'last' mode only the final one is drawn, and only when `endsCall` (the end of a public call). */
+  const run = async (frames: number, dt: number, endsCall: boolean) => {
     for (let i = 0; i < frames; i++) {
       platform.clock += dt * 1000;
-      game.step(dt);
+      game.update(Math.min(Math.max(dt, 0), game.config.maxDt));
+      if (renderMode === 'every' || (renderMode === 'last' && endsCall && i === frames - 1)) {
+        game.render();
+      } else {
+        game.emit('prerender', ctx);
+        layoutVisibleUI(game.stage);
+        game.emit('postrender', ctx);
+      }
       await flush();
     }
   };
+  const step = (frames = 1, dt = dt60) => run(frames, dt, true);
 
   if (opts.app) {
     await bootApp(game, opts.scene ? { ...opts.app, start: '' } : opts.app);
@@ -149,6 +194,12 @@ export async function createTestGame(opts: TestGameOptions = {}): Promise<TestGa
     get scene() {
       return game.scenes.current;
     },
+    get renderMode() {
+      return renderMode;
+    },
+    set renderMode(m: TestRenderMode) {
+      renderMode = m;
+    },
     step,
     advance: async (seconds: number) => step(Math.max(1, Math.round(seconds * 60))),
     go: async (name, params) => {
@@ -162,14 +213,14 @@ export async function createTestGame(opts: TestGameOptions = {}): Promise<TestGa
     tap: async (target) => {
       const p = toScreen(point(target));
       platform.touch('start', [{ id: 1, x: p.x, y: p.y }]);
-      await step(1);
+      await run(1, dt60, false);
       platform.touch('end', [{ id: 1, x: p.x, y: p.y }]);
       await step(1);
     },
     press: async (target, seconds) => {
       const p = toScreen(point(target));
       platform.touch('start', [{ id: 1, x: p.x, y: p.y }]);
-      await step(Math.max(1, Math.round(seconds * 60)));
+      await run(Math.max(1, Math.round(seconds * 60)), dt60, false);
       platform.touch('end', [{ id: 1, x: p.x, y: p.y }]);
       await step(1);
     },
@@ -177,11 +228,11 @@ export async function createTestGame(opts: TestGameOptions = {}): Promise<TestGa
       const a = toScreen(point(from));
       const b = toScreen(point(to));
       platform.touch('start', [{ id: 1, x: a.x, y: a.y }]);
-      await step(1);
+      await run(1, dt60, false);
       for (let i = 1; i <= steps; i++) {
         const k = i / steps;
         platform.touch('move', [{ id: 1, x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k }]);
-        await step(1);
+        await run(1, dt60, false);
       }
       platform.touch('end', [{ id: 1, x: b.x, y: b.y }]);
       await step(1);

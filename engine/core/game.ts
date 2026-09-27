@@ -1,3 +1,4 @@
+import { setTextureBackingScale } from '../gfx/texture';
 import type { Ctx2D } from '../gfx/types';
 import type { Platform, RawTouchEvent } from '../platform/types';
 import { Node, type PointerEvt, type PointerPhase } from '../scene/node';
@@ -5,6 +6,7 @@ import { type Scene, SceneManager } from '../scene/scene';
 import type { Color } from './color';
 import { Emitter } from './emitter';
 import { Mat2D, type Insets, type Rect, type Vec2 } from './math';
+import { GameStats } from './stats';
 
 /**
  * - 'expand': uniform scale so the design size fits, then the view grows along the longer axis
@@ -126,6 +128,8 @@ export class Game extends Emitter<GameEvents> {
   pixelRatio = 1;
 
   readonly time: GameTime = { elapsed: 0, realElapsed: 0, dt: 0, frame: 0, timeScale: 1 };
+  /** fps, update/render ms, node and texture counts (see showDebugOverlay for an on-screen panel). */
+  readonly stats: GameStats;
   /** When true, systems and the stage stop updating; rendering continues. */
   paused = false;
   background: Color;
@@ -155,6 +159,7 @@ export class Game extends Emitter<GameEvents> {
       ...config,
     };
     this.background = this.cfg.background;
+    this.stats = new GameStats(this);
     this.ctx = platform.canvas.getContext('2d');
     this.stage.append(this.sceneLayer, this.overlay);
     this.scenes = new SceneManager(this, this.sceneLayer);
@@ -212,11 +217,18 @@ export class Game extends Emitter<GameEvents> {
 
   /** One frame: update (dt clamped to maxDt) then render. Tests call this directly. */
   step(dt: number): void {
+    this.stats.noteInterval(dt);
     this.update(Math.min(Math.max(dt, 0), this.cfg.maxDt));
     this.render();
   }
 
   update(rawDt: number): void {
+    const t0 = this.stats.now();
+    this.runUpdate(rawDt);
+    this.stats.endUpdate(rawDt, t0);
+  }
+
+  private runUpdate(rawDt: number): void {
     const dt = rawDt * this.time.timeScale;
     this.time.dt = dt;
     this.time.frame++;
@@ -230,6 +242,8 @@ export class Game extends Emitter<GameEvents> {
   }
 
   render(): void {
+    const t0 = this.stats.now();
+    const drawn0 = Node.renderCount;
     const ctx = this.ctx;
     const canvas = this.platform.canvas;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -242,6 +256,7 @@ export class Game extends Emitter<GameEvents> {
     this.emit('prerender', ctx);
     this.stage.render(ctx);
     this.emit('postrender', ctx);
+    this.stats.endRender(t0, Node.renderCount - drawn0);
   }
 
   /** Registers a per-frame system (runs before the stage, lower priority first). Returns a remover. */
@@ -381,6 +396,11 @@ export class Game extends Emitter<GameEvents> {
     }
   }
 }
+
+setTextureBackingScale(() => {
+  const g = Game.current;
+  return g ? g.pixelRatio * g.scale : 1;
+});
 
 const hitMat = new Mat2D();
 

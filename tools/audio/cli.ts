@@ -1,16 +1,17 @@
 /**
  * Renders an app's sound definitions into audio files + manifest, prints an analysis table.
  *
- *   pnpm audio                              -> sandbox/assets/audio/*.mp3 + manifest.json
+ *   pnpm audio                              -> <app>/assets/audio/*.mp3 + manifest.json
  *   pnpm audio --only coin,menu --preview   -> also .shots/audio/coin.png, .shots/audio/menu.png
- *   pnpm audio --app game --format wav --force
+ *   pnpm audio --app sandbox --format wav --force
  *
  * Options:
- *   --app <dir>          app directory with audio/index.ts (default: sandbox)
+ *   --app <dir>          app directory with audio/index.ts (default: package.json "engine.app", else sandbox)
  *   --only <a,b>         render only these sounds (others stay as they are)
  *   --format mp3|wav     output format (default mp3: sfx mono 64 kbps, music stereo 128 kbps or song.kbps)
  *   --preview            write waveform/spectrogram (+ piano roll) PNGs to .shots/audio/<name>.png
  *   --force              ignore the render cache
+ *   --help               print this help
  *
  * `<app>/audio/index.ts` exports `sfx: Record<string, SfxParams | () => SfxParams>` and
  * `music: Record<string, SongDef>` (named exports or a default `{ sfx, music }`). Unchanged sounds are skipped
@@ -37,6 +38,7 @@ import {
   type SongDef,
   type SongSchedule,
 } from '@engine';
+import { defaultApp, exitWithUsage } from '../common/app';
 import { encodeMp3, MP3_DECODER_DELAY, mp3Info } from './mp3';
 import { renderAudioPreview } from './preview';
 
@@ -64,12 +66,12 @@ const MUSIC_KBPS = 128;
 const CACHE_VERSION = 1;
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { app: 'sandbox', only: null, format: 'mp3', preview: false, force: false };
+  const a: Args = { app: defaultApp(), only: null, format: 'mp3', preview: false, force: false };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]!;
     const v = () => {
       const val = argv[++i];
-      if (val === undefined) throw new Error(`missing value for ${k}`);
+      if (val === undefined) exitWithUsage(import.meta.url, `missing value for ${k}`);
       return val;
     };
     switch (k) {
@@ -81,7 +83,7 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--format': {
         const f = v();
-        if (f !== 'mp3' && f !== 'wav') throw new Error('--format must be mp3 or wav');
+        if (f !== 'mp3' && f !== 'wav') exitWithUsage(import.meta.url, '--format must be mp3 or wav');
         a.format = f;
         break;
       }
@@ -91,8 +93,11 @@ function parseArgs(argv: string[]): Args {
       case '--force':
         a.force = true;
         break;
+      case '--help':
+      case '-h':
+        exitWithUsage(import.meta.url);
       default:
-        throw new Error(`unknown option ${k}`);
+        exitWithUsage(import.meta.url, `unknown option ${k}`);
     }
   }
   return a;

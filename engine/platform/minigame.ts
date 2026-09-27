@@ -7,6 +7,7 @@ import type {
   KeyValueStorage,
   LoginResult,
   Platform,
+  PlatformKeyEvent,
   PlayOptions,
   RawTouch,
   RawTouchEvent,
@@ -170,6 +171,57 @@ function createClock(api: MiniGameApi): () => number {
     }
     return base + dp * scale;
   };
+}
+
+// ------------------------------------------------------------------ keyboard + language
+
+/** wx.onKeyDown / onKeyUp payload (PC clients only; tt / tap mirror it where available). */
+interface MgKeyEvent {
+  key?: string;
+  code?: string;
+  timeStamp?: number;
+}
+
+/** Optional APIs used here that minigame-api.ts does not type. */
+interface MgExtraApi {
+  onKeyDown?(cb: (e: MgKeyEvent) => void): void;
+  onKeyUp?(cb: (e: MgKeyEvent) => void): void;
+  /** wx 2.25.3+: replaces getSystemInfoSync for app-level info. */
+  getAppBaseInfo?(): { language?: string };
+}
+
+const NAMED_KEY_CODES: Record<string, string> = {
+  ' ': 'Space',
+  Spacebar: 'Space',
+  Esc: 'Escape',
+  Up: 'ArrowUp',
+  Down: 'ArrowDown',
+  Left: 'ArrowLeft',
+  Right: 'ArrowRight',
+  Shift: 'ShiftLeft',
+  Control: 'ControlLeft',
+  Alt: 'AltLeft',
+  Meta: 'MetaLeft',
+};
+
+/**
+ * KeyboardEvent.code for a host that only reports `key` ('a' → 'KeyA', '1' → 'Digit1', ' ' → 'Space');
+ * named keys ('ArrowUp', 'Enter', 'Escape', 'F1') are already codes.
+ */
+export function mgKeyCode(key: string): string {
+  if (NAMED_KEY_CODES[key]) return NAMED_KEY_CODES[key]!;
+  if (/^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+  return key;
+}
+
+/** 'zh_CN' → 'zh-CN'; undefined when the host reports nothing usable. */
+export function mgLanguage(api: MiniGameApi): string | undefined {
+  const extra = api as MiniGameApi & MgExtraApi;
+  const raw =
+    attempt(() => extra.getAppBaseInfo?.().language) ||
+    attempt(() => (api.getSystemInfoSync?.() as { language?: string } | undefined)?.language);
+  return typeof raw === 'string' && raw ? raw.replace(/_/g, '-') : undefined;
 }
 
 // ------------------------------------------------------------------ storage
@@ -614,6 +666,9 @@ export class MiniGamePlatform implements Platform {
   readonly audio: MiniGameAudio;
   readonly ads: MiniGameAds;
   readonly now: () => number;
+  readonly language: string | undefined;
+  /** Present only when the runtime has onKeyDown / onKeyUp (PC clients). */
+  readonly onKey?: (cb: (e: PlatformKeyEvent) => void) => () => void;
 
   private readonly base: string;
   private readonly fs: MgFileSystemManager | undefined;
@@ -621,6 +676,9 @@ export class MiniGamePlatform implements Platform {
   private readonly showCbs = new Listeners<void>();
   private readonly hideCbs = new Listeners<void>();
   private readonly resizeCbs = new Listeners<void>();
+  private readonly keyCbs = new Listeners<PlatformKeyEvent>();
+  /** Held keys: code → key. */
+  private readonly heldKeys = new Map<string, string>();
   private readonly shareDefaults: ShareOptions;
 
   constructor(
@@ -641,6 +699,18 @@ export class MiniGamePlatform implements Platform {
     });
     this.ads = new MiniGameAds(api, opts.reuseInterstitial ?? false);
     this.shareDefaults = { ...opts.share };
+    this.language = mgLanguage(api);
+    const keyApi = api as MiniGameApi & MgExtraApi;
+    if (typeof keyApi.onKeyDown === 'function' || typeof keyApi.onKeyUp === 'function') {
+      this.onKey = (cb) => this.keyCbs.add(cb);
+      const key = (type: 'down' | 'up') => (e: MgKeyEvent) => {
+        const k = typeof e?.key === 'string' ? e.key : '';
+        const code = typeof e?.code === 'string' && e.code ? e.code : mgKeyCode(k);
+        if (code) this.emitKey(type, code, k);
+      };
+      attempt(() => keyApi.onKeyDown?.(key('down')));
+      attempt(() => keyApi.onKeyUp?.(key('up')));
+    }
 
     const touch = (phase: TouchPhase) => (e: MgTouchEvent) => {
       const list = e?.changedTouches ?? [];
@@ -656,7 +726,12 @@ export class MiniGamePlatform implements Platform {
     attempt(() => api.onTouchEnd?.(touch('end')));
     attempt(() => api.onTouchCancel?.(touch('cancel')));
     attempt(() => api.onShow?.(() => this.showCbs.emit()));
-    attempt(() => api.onHide?.(() => this.hideCbs.emit()));
+    attempt(() =>
+      api.onHide?.(() => {
+        for (const [code, k] of [...this.heldKeys]) this.emitKey('up', code, k);
+        this.hideCbs.emit();
+      }),
+    );
     // Only PC / tablet WeChat resizes the window; phones never fire it.
     attempt(() =>
       api.onWindowResize?.(() => {
@@ -766,6 +841,16 @@ export class MiniGamePlatform implements Platform {
         finish({ ok: false, error: errText(e) });
       }
     });
+  }
+
+  private emitKey(type: 'down' | 'up', code: string, key: string): void {
+    if (type === 'down') {
+      const repeat = this.heldKeys.has(code);
+      this.heldKeys.set(code, key);
+      this.keyCbs.emit({ type, code, key, repeat });
+    } else if (this.heldKeys.delete(code)) {
+      this.keyCbs.emit({ type, code, key, repeat: false });
+    }
   }
 
   /** Releases audio contexts and ad instances. */

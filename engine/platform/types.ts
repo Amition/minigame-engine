@@ -27,6 +27,27 @@ export interface RawTouchEvent {
   touches: RawTouch[];
 }
 
+export interface PlatformKeyEvent {
+  type: 'down' | 'up';
+  /** Physical key in KeyboardEvent.code style: 'KeyA', 'Digit1', 'Space', 'ArrowUp', 'ShiftLeft', 'Enter', 'Escape'. */
+  code: string;
+  /** Produced value in KeyboardEvent.key style ('a', 'A', ' ', 'ArrowUp'); '' when the host does not say. */
+  key: string;
+  /** Auto-repeat of a key that is already held (only on 'down'). */
+  repeat: boolean;
+}
+
+/** Snapshot of one connected gamepad. With `standard` mapping, buttons/axes follow the W3C standard layout. */
+export interface PlatformGamepad {
+  index: number;
+  id: string;
+  standard: boolean;
+  /** Button values 0..1 (index 0 = A / bottom face button). */
+  buttons: number[];
+  /** Axes -1..1: 0 left stick x, 1 left stick y (down = +1), 2 right stick x, 3 right stick y. */
+  axes: number[];
+}
+
 export interface KeyValueStorage {
   get(key: string): string | null;
   set(key: string, value: string): void;
@@ -93,6 +114,8 @@ export interface Platform {
   readonly canvas: Surface;
   /** Default CSS font-family stack for this platform. */
   readonly fontFamily: string;
+  /** System / host app language as a BCP 47 tag ('zh-CN', 'en-US'), when the host reports one. */
+  readonly language?: string;
 
   createCanvas(width: number, height: number): Surface;
   /** Loads an image from the app assets dir, e.g. 'ui/button.png'. */
@@ -110,6 +133,13 @@ export interface Platform {
   onHide(cb: () => void): () => void;
   /** Screen size changes (web window resize). Mini-games never fire it. */
   onResize(cb: () => void): () => void;
+  /**
+   * Keyboard events (web; PC clients of wx/tt/tap). Absent when the host has no keyboard API. Hosts send an 'up' for
+   * every held key when focus is lost, so keys never stick.
+   */
+  onKey?(cb: (e: PlatformKeyEvent) => void): () => void;
+  /** Connected gamepads, polled once per frame by the runtime (web Gamepad API). Absent when unsupported. */
+  pollGamepads?(): PlatformGamepad[];
 
   readonly storage: KeyValueStorage;
   readonly audio: AudioBackend;

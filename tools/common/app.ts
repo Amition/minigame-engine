@@ -19,3 +19,25 @@ export function defaultApp(): string {
   cached = app;
   return app;
 }
+
+/** Usage text of a CLI: the first `/** ... *\/` comment of its source file (pass `import.meta.url`). */
+export function cliUsage(moduleUrl: string): string {
+  const src = readFileSync(fileURLToPath(moduleUrl), 'utf8');
+  const m = /\/\*\*([\s\S]*?)\*\//.exec(src);
+  const text = (m?.[1] ?? '')
+    .split('\n')
+    .map((l) => l.replace(/^\s*\* ?/, ''))
+    .join('\n')
+    .trim();
+  return `${text}\n\nDefault --app: ${defaultApp()} (package.json "engine.app")`;
+}
+
+/** Handles `--help` / a bad command line for CLIs whose usage is their header comment. */
+export function exitWithUsage(moduleUrl: string, error?: string): never {
+  if (error) {
+    console.error(`${cliUsage(moduleUrl)}\n\nerror: ${error}`);
+    process.exit(1);
+  }
+  console.log(cliUsage(moduleUrl));
+  process.exit(0);
+}

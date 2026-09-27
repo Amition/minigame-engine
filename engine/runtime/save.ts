@@ -36,6 +36,18 @@ function mergeDefaults(def: unknown, val: unknown): unknown {
   return typeof val === typeof def ? val : clone(def);
 }
 
+/** Stores holding data in memory (loaded since their last reload()). */
+const loadedStores = new Set<SaveStore<object>>();
+
+/**
+ * Drops the in-memory data of every SaveStore (pending debounced writes are discarded), so the next access reads
+ * the current platform's storage. createTestGame() calls it: module-level stores then see the fresh storage of
+ * each test game instead of the previous test's data.
+ */
+export function reloadAllSaves(): void {
+  for (const s of [...loadedStores]) s.reload();
+}
+
 /**
  * Typed persistent store in platform storage (JSON `{ v, data }`). Loads lazily on first access, so it can be
  * created at module level. Mutate `data` then call save(), or use set()/update() which save for you.
@@ -59,7 +71,11 @@ export class SaveStore<T extends object> {
 
   /** The live data object. */
   get data(): T {
-    return (this._data ??= this.load());
+    if (this._data === null) {
+      this._data = this.load();
+      loadedStores.add(this);
+    }
+    return this._data;
   }
 
   /** Shallow-merges a patch and schedules a save. */
@@ -114,16 +130,18 @@ export class SaveStore<T extends object> {
   /** Restores the defaults and writes immediately. */
   reset(): void {
     this._data = clone(this.defaults);
+    loadedStores.add(this);
     this.dirty = true;
     this.flush();
   }
 
-  /** Drops the in-memory copy; the next access reads storage again. */
+  /** Drops the in-memory copy (and any unsaved changes); the next access reads storage again. */
   reload(): void {
     this.timer?.cancel();
     this.timer = null;
     this.dirty = false;
     this._data = null;
+    loadedStores.delete(this);
   }
 
   private storage(): KeyValueStorage {

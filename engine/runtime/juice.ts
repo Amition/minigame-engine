@@ -3,10 +3,12 @@ import type { Game } from '../core/game';
 import { rng } from '../core/rng';
 import { Box } from '../scene/box';
 import type { Node } from '../scene/node';
+import { squashBaseScale } from './spring';
 import { resolveGame } from './ticker';
 import { Tween, tween, type TweenOptions } from './tween';
 
 // Scale-based helpers (punch, pulse, popIn, popOut) scale around the node's anchor: use anchor 0.5 for centered motion.
+// Spring effects (squashSpring, wobble, springProp) live in ./spring.
 
 type JuiceOptions = Pick<TweenOptions, 'realtime' | 'game' | 'onComplete'>;
 
@@ -58,7 +60,10 @@ interface ScaleJob {
 
 const scaleJobs = new WeakMap<Node, ScaleJob>();
 
-/** Starts a scale animation from the node's rest scale, cancelling (and undoing) a previous scale helper. */
+/**
+ * Starts a scale animation from the node's rest scale, cancelling (and undoing) a previous scale helper.
+ * A running squashSpring() is not part of the rest scale: it keeps multiplying on top of the new animation.
+ */
 function scaleJob(node: Node, build: (sx: number, sy: number, restore: () => void) => Tween<Node>): Tween<Node> {
   const prev = scaleJobs.get(node);
   if (prev) {
@@ -66,8 +71,7 @@ function scaleJob(node: Node, build: (sx: number, sy: number, restore: () => voi
     node.scaleX = prev.sx;
     node.scaleY = prev.sy;
   }
-  const sx = node.scaleX;
-  const sy = node.scaleY;
+  const { x: sx, y: sy } = squashBaseScale(node);
   const job: ScaleJob = { tween: null!, sx, sy };
   const restore = () => {
     if (scaleJobs.get(node) === job) scaleJobs.delete(node);

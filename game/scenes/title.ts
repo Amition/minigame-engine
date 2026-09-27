@@ -53,7 +53,7 @@ export class TitleScene extends Scene {
         ui.text(stats, { id: 'stats', variant: 'h2', size: 32, color: '#8a4a1f', align: 'center' }),
         ui.button({ id: 'start', text: '开始游戏', icon: 'play', variant: 'success', size: 'xl', width: 460, margin: [24, 0, 0, 0], onTap: () => this.start() }),
       ]),
-      { safeArea: true, replace: false },
+      { replace: false },
     );
     getAudioManager(g)?.playMusic('bgm', { fadeMs: 1500 });
   }

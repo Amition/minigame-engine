@@ -1,3 +1,7 @@
 allowBuilds:
   esbuild: true
 verifyDepsBeforeRun: false
+# pnpm 11 echoes "$ <command>" to stderr before every script; PowerShell shows that as a red NativeCommandError
+# even when the script succeeds. The silent reporter is the only switch for it. It also hides pnpm's own output
+# and errors (exit codes still propagate), so run installs as: pnpm install --reporter=default
+reporter: silent

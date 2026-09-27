@@ -8,3 +8,4 @@ export * from './song';
 export * from './wav';
 export * from './analyze';
 export * from './manager';
+export * from './shortcuts';

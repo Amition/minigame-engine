@@ -356,6 +356,7 @@ describe('CacheContainer', () => {
 
   it('renders children once and redraws only when marked dirty', async () => {
     t = await pixelGame();
+    t.renderMode = 'every';
     const c = t.game.sceneLayer.add(new CacheContainer(100, 100, { x: 50, y: 50, resolution: 1 }));
     const box = c.add(new CountingBox(100, 100, { fill: '#00ff00' }));
     await t.step(3);
