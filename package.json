@@ -1,0 +1,34 @@
+{
+  "name": "game",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.13.1",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm typecheck && pnpm test",
+    "shot": "tsx tools/shot/run.ts",
+    "dev": "tsx tools/dev/server.ts",
+    "build": "tsx tools/build/build.ts",
+    "build:web": "tsx tools/build/build.ts --target web",
+    "build:wx": "tsx tools/build/build.ts --target wx",
+    "build:tt": "tsx tools/build/build.ts --target tt",
+    "build:tap": "tsx tools/build/build.ts --target tap",
+    "build:233": "tsx tools/build/build.ts --target 233",
+    "build:all": "tsx tools/build/build.ts --target all",
+    "audio": "tsx tools/audio/cli.ts",
+    "art:preview": "tsx tools/art/preview.ts"
+  },
+  "devDependencies": {
+    "@breezystack/lamejs": "1.2.7",
+    "@napi-rs/canvas": "1.0.9",
+    "@types/node": "26.6.3",
+    "esbuild": "0.28.2",
+    "playwright-core": "1.63.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.2"
+  }
+}
