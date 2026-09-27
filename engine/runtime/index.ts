@@ -12,3 +12,5 @@ export * from './pool';
 export * from './state';
 export * from './fixed';
 export * from './events';
+export * from './input';
+export * from './i18n';

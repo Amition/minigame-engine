@@ -7,6 +7,7 @@ export * from './core/rng';
 export * from './core/color';
 export * from './core/game';
 export * from './core/app';
+export * from './core/stats';
 
 export * from './gfx/types';
 export * from './gfx/texture';
@@ -15,6 +16,7 @@ export * from './gfx/draw';
 
 export * from './platform/types';
 export * from './platform/current';
+export * from './platform/ads';
 
 export * from './scene/node';
 export * from './scene/selector';

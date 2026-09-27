@@ -20,7 +20,12 @@
     "build:233": "tsx tools/build/build.ts --target 233",
     "build:all": "tsx tools/build/build.ts --target all",
     "audio": "tsx tools/audio/cli.ts",
-    "art:preview": "tsx tools/art/preview.ts"
+    "art:preview": "tsx tools/art/preview.ts",
+    "bench": "tsx tools/bench/run.ts",
+    "lint:encoding": "tsx tools/lint/encoding.ts"
+  },
+  "engine": {
+    "app": "game"
   },
   "devDependencies": {
     "@breezystack/lamejs": "1.2.7",

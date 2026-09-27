@@ -8,3 +8,4 @@ export * from './particles';
 export * from './particle-presets';
 export * from './containers';
 export * from './effects';
+export * from './debug';

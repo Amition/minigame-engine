@@ -12,3 +12,4 @@ export * from './ground';
 export * from './iso';
 export * from './perspective';
 export * from './physics';
+export * from './rigid';
