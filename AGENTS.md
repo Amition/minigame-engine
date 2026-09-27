@@ -17,6 +17,8 @@ So every feature must be inspectable from code: text dumps, lint reports, headle
 - `pnpm shot [--app <dir>] --scene <name> [--device "iphone-se,iphone-14,ipad"|all] [--tap <selector|x,y>]
   [--drag "<a>|<b>"] [--wait 0.5] [--seconds 1] [--seed 1] [--params '<json>'] [--dump] [--lint] [--bounds]` —
   headless screenshot into `.shots/`; `--tap/--drag/--wait` repeat and run in order. Read the PNG to look at it.
+  Landscape apps (app.json `"orientation": "landscape"`) use `iphone-se-land, iphone-14-land, android-land, ipad-land`;
+  shot/bench/dev default to them and `--device all` picks the profiles of the app's orientation.
   `--dump` prints the node tree, `--lint` prints the UI lint report (exit 1 on errors), `--bounds` writes an
   extra `-bounds.png` with hit areas / text boxes / issues drawn on top. `--help` lists everything.
 - `pnpm shot:browser` — same options in real Chrome (falls back to Edge), plus `--input engine|touch|mouse`,
@@ -94,14 +96,15 @@ sandbox/           engine showcase app = compatibility test pack; scenes/<module
                    audio/index.ts (sound definitions), app.json (store metadata, appids, ad unit ids)
 game/              合成大西瓜 (Suika-style merge game), the default app for CLIs (package.json "engine.app") and
                    the worked example in the `make-a-game` skill
+archer/            布偶弓箭手 (Ragdoll Archers clone), landscape 1334x750: Verlet ragdoll, archery duel, upgrades menu
 tools/             node CLIs: shot, build, dev, audio, art
 tests/             cross-module tests
 ```
 
 ## Core conventions
 
-- Design resolution 750x1334 portrait, scale mode 'expand': `game.view` is the visible size in design units,
-  `game.safe` the safe rect. Lay out against these, never against raw screen pixels.
+- Design resolution 750x1334 portrait (1334x750 for landscape apps), scale mode 'expand': `game.view` is the visible
+  size in design units, `game.safe` the safe rect. Lay out against these, never against raw screen pixels.
 - Node local space: origin at the content box top-left; (x, y) positions the anchor; anchor is the pivot.
   Subclasses override `draw(ctx)` and `describe()` (props shown in dumps / usable in selectors) and `kind`.
 - Selectors: `Kind#id.tag[key=value][key*=sub]`, descendant `A B`, child `A > B`.

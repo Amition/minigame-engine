@@ -10,7 +10,7 @@
  *   --app <dir>          app directory containing main.ts (default: package.json "engine.app", else sandbox)
  *   --scene <name>       scene to open (default: the app's start scene)
  *   --params <json>      params passed to the scene
- *   --device <name>      device name or WxH@dpr (default: iphone-14)
+ *   --device <name>      device name or WxH@dpr (default: iphone-14, iphone-14-land for landscape apps)
  *   --seconds <n>        simulated seconds to measure, 60 frames each (default 10)
  *   --warmup <n>         simulated seconds run before measuring (default 1)
  *   --taps none|random   random taps in the lower 2/3 of the view (default none)
@@ -22,7 +22,8 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { autoTextureResolution, Rng, textureStats, type AppDef, type TextureStatsEntry } from '@engine';
-import { createTestGame } from '@engine/testing';
+import { createTestGame, defaultDevice } from '@engine/testing';
+import { readAppMeta } from '../build/config';
 import { defaultApp } from '../common/app';
 
 interface Args {
@@ -39,7 +40,7 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { app: defaultApp(), device: 'iphone-14', seconds: 10, warmup: 1, taps: 'none', tapEvery: 0.8, seed: 1, json: false };
+  const a: Args = { app: defaultApp(), device: '', seconds: 10, warmup: 1, taps: 'none', tapEvery: 0.8, seed: 1, json: false };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]!;
     const v = () => {
@@ -90,6 +91,7 @@ function parseArgs(argv: string[]): Args {
         throw new Error(`unknown option ${k}`);
     }
   }
+  if (!a.device) a.device = defaultDevice(readAppMeta(resolve(a.app)).orientation);
   return a;
 }
 

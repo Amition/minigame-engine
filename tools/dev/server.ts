@@ -24,7 +24,7 @@ import { networkInterfaces } from 'node:os';
 import { basename, join } from 'node:path';
 import * as esbuild from 'esbuild';
 import { devices, resolveDevice } from '../../engine/testing/devices';
-import { esbuildOptions, readAppMeta, resolveApp, ROOT } from '../build/config';
+import { esbuildOptions, readAppMeta, resolveApp, ROOT, type AppMeta } from '../build/config';
 import { defaultApp, exitWithUsage } from '../common/app';
 import { webIndexHtml } from '../build/files';
 import { fileInRoot, listen, send, sendFile } from './static';
@@ -53,11 +53,15 @@ function parseArgs(argv: string[]): Args {
   return a;
 }
 
-const FRAME_DEVICES = ['iphone-se', 'iphone-14', 'android'];
+const FRAME_DEVICES: Record<AppMeta['orientation'], string[]> = {
+  portrait: ['iphone-se', 'iphone-14', 'android'],
+  landscape: ['iphone-se-land', 'iphone-14-land', 'ipad-land'],
+};
 
 /** /frame: one iframe per device at its CSS size, scaled down to fit the window height. */
-function framePage(title: string, query: URLSearchParams): string {
-  const names = (query.get('devices') ?? FRAME_DEVICES.join(',')).split(',').filter(Boolean);
+function framePage(meta: AppMeta, query: URLSearchParams): string {
+  const title = meta.name;
+  const names = (query.get('devices') ?? FRAME_DEVICES[meta.orientation].join(',')).split(',').filter(Boolean);
   query.delete('devices');
   const cells = names
     .map((name) => {
@@ -154,7 +158,7 @@ async function main(): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
     if (path === '/' || path === '/index.html') return send(res, 200, webIndexHtml(meta, { liveReload: true }), 'text/html; charset=utf-8');
-    if (path === '/frame' || path === '/frame/') return send(res, 200, framePage(meta.name, url.searchParams), 'text/html; charset=utf-8');
+    if (path === '/frame' || path === '/frame/') return send(res, 200, framePage(meta, url.searchParams), 'text/html; charset=utf-8');
     if (path === '/game.js' || path === '/game.js.map') {
       const out = outputs.get(path.slice(1));
       if (out) return send(res, 200, out, path.endsWith('.map') ? 'application/json' : 'text/javascript; charset=utf-8');
@@ -184,7 +188,7 @@ async function main(): Promise<void> {
   console.log(`\n  ${meta.name} (${basename(appDir)}) dev server`);
   console.log(`  Local:   ${local}`);
   for (const u of lanUrls(port)) console.log(`  LAN:     ${u}   (phone on the same Wi-Fi)`);
-  console.log(`  Frames:  ${local}frame   (${FRAME_DEVICES.join(', ')}; ?devices=${Object.keys(devices).join(',')})`);
+  console.log(`  Frames:  ${local}frame   (${FRAME_DEVICES[meta.orientation].join(', ')}; ?devices=${Object.keys(devices).join(',')})`);
   console.log(`  Scene:   ${local}?scene=<name>\n`);
 
   const stop = async () => {

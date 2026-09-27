@@ -22,10 +22,21 @@ describe('shot args', () => {
     expect(a.seconds).toBe(1);
   });
 
+  it('defaults to landscape profiles for landscape apps (app.json orientation)', () => {
+    expect(parseShotArgs(['--app', 'archer'], 'shot').devices).toEqual(['iphone-14-land']);
+    expect(parseShotArgs(['--device', 'all', '--app', 'archer'], 'shot').devices).toEqual([
+      'iphone-se-land',
+      'iphone-14-land',
+      'android-land',
+      'ipad-land',
+    ]);
+    expect(parseShotArgs(['--app', 'archer', '--device', 'ipad'], 'shot').devices).toEqual(['ipad']);
+  });
+
   it('parses devices, flags and tool-specific options', () => {
     const a = parseShotArgs(['--devices', 'iphone-se, ipad', '--dump', '--lint', '--bounds', '--no-insets', '--seed', '7'], 'shot');
     expect(a).toMatchObject({ devices: ['iphone-se', 'ipad'], dump: true, lint: true, bounds: true, insets: false, seed: 7 });
-    expect(parseShotArgs(['--device', 'all'], 'shot').devices.length).toBeGreaterThan(3);
+    expect(parseShotArgs(['--device', 'all'], 'shot').devices).toEqual(['iphone-se', 'iphone-14', 'iphone-15-pro-max', 'android', 'ipad']);
     expect(parseShotArgs(['--browser', 'x.exe', '--timeout', '5', '--input', 'mouse'], 'shot:browser')).toMatchObject({
       browser: 'x.exe',
       timeout: 5,

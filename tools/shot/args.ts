@@ -1,7 +1,8 @@
 // Shared command line of `pnpm shot` (headless, run.ts) and `pnpm shot:browser` (real browser, browser.ts):
 // same options, same defaults where both can support them, one usage text generated from OPTIONS.
 import { basename, resolve } from 'node:path';
-import { devices } from '../../engine/testing/devices';
+import { defaultDevice, devices, devicesFor } from '../../engine/testing/devices';
+import { readAppMeta } from '../build/config';
 import { defaultApp } from '../common/app';
 
 export type ShotTool = 'shot' | 'shot:browser';
@@ -123,8 +124,10 @@ const OPTIONS: OptionDef[] = [
   {
     flag: '--device',
     arg: '<list>',
-    help: `comma list of ${Object.keys(devices).join(', ')} or WxH@dpr; 'all' = every profile (default iphone-14)`,
-    apply: (a, v) => (a.devices = v === 'all' ? Object.keys(devices) : v.split(',').map((d) => d.trim()).filter(Boolean)),
+    help:
+      `comma list of ${Object.keys(devices).join(', ')} or WxH@dpr; 'all' = every profile of the app's orientation ` +
+      "(app.json; default iphone-14, or iphone-14-land for landscape apps)",
+    apply: (a, v) => (a.devices = v === 'all' ? ['all'] : v.split(',').map((d) => d.trim()).filter(Boolean)),
   },
   {
     flag: '--tap',
@@ -235,6 +238,7 @@ export function defaultShotArgs(tool: ShotTool): ShotArgs {
 /** Parses argv (without node/script). Throws UsageError on unknown options or bad values. */
 export function parseShotArgs(argv: readonly string[], tool: ShotTool): ShotArgs {
   const a = defaultShotArgs(tool);
+  let devicesGiven = false;
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i]!;
     if (raw === '--' && i === 0) continue;
@@ -253,7 +257,11 @@ export function parseShotArgs(argv: readonly string[], tool: ShotTool): ShotArgs
       }
     } else if (eq > 0) throw new UsageError(`${def.flag} takes no value`);
     def.apply(a, value, tool);
+    if (def.flag === '--device') devicesGiven = true;
   }
+  const orientation = readAppMeta(resolve(a.app)).orientation;
+  if (!devicesGiven) a.devices = [defaultDevice(orientation)];
+  else if (a.devices.includes('all')) a.devices = devicesFor(orientation);
   if (a.out && a.devices.length > 1) throw new UsageError('--out needs a single --device');
   return a;
 }

@@ -58,7 +58,7 @@ Options (`TestGameOptions`):
 |---|---|---|
 | `app` | none | AppDef to boot (scenes, `boot()`, start scene); without it you get an empty 750x1334 game |
 | `config` | 750x1334 | `Partial<GameConfig>` when there is no app (`maxDt`, `scaleMode`, ...) |
-| `device` | `'iphone-14'` | `iphone-se`, `iphone-14`, `iphone-15-pro-max`, `android`, `ipad`, `'WxH@dpr'` or a `DeviceSpec` |
+| `device` | `'iphone-14'` | `iphone-se`, `iphone-14`, `iphone-15-pro-max`, `android`, `ipad`; landscape `iphone-se-land`, `iphone-14-land`, `android-land`, `ipad-land` (`devicesFor('landscape')`); `'WxH@dpr'` or a `DeviceSpec` |
 | `scene`, `params` | app start | scene to open after boot, with params |
 | `seed` | `1` | reseeds the shared `rng` |
 | `render` | `'last'` | which frames are drawn, see below |

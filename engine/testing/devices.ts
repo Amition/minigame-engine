@@ -32,6 +32,18 @@ export const devices = {
 
 export type DeviceName = keyof typeof devices;
 
+export type Orientation = 'portrait' | 'landscape';
+
+/** Profiles of one orientation (app.json "orientation"), in declaration order. */
+export function devicesFor(orientation: Orientation): DeviceName[] {
+  return (Object.keys(devices) as DeviceName[]).filter((d) => devices[d].width > devices[d].height === (orientation === 'landscape'));
+}
+
+/** Default profile for an orientation: the notched iPhone. */
+export function defaultDevice(orientation: Orientation): DeviceName {
+  return orientation === 'landscape' ? 'iphone-14-land' : 'iphone-14';
+}
+
 /** Accepts a device name or 'WIDTHxHEIGHT[@DPR]' (e.g. '414x896@2'). */
 export function resolveDevice(d: DeviceName | string | DeviceSpec | undefined): DeviceSpec {
   if (!d) return devices['iphone-14'];
