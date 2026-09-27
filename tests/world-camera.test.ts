@@ -154,6 +154,23 @@ describe('World', () => {
     expect(vb.w).toBeCloseTo(t.game.view.width);
   });
 
+  it('does not hit world children outside the clipped viewport', async () => {
+    t = await createTestGame();
+    const world = t.game.sceneLayer.add(new World({ x: 0, y: 200, width: 750, height: 400, cull: false }));
+    world.camera.lookAt(0, 0);
+    const inside = world.add(new Box(40, 40, { fill: '#0f0' }, { x: 0, y: 0, anchor: 0.5, interactive: true }));
+    const below = world.add(new Box(40, 40, { fill: '#f00' }, { x: 0, y: 300, anchor: 0.5, interactive: true }));
+    await t.step(1);
+    const a = inside.worldCenter();
+    const b = below.worldCenter();
+    expect(a.y).toBeCloseTo(400, 3);
+    expect(b.y).toBeCloseTo(700, 3);
+    expect(t.game.hitTest(a.x, a.y)).toBe(inside);
+    expect(t.game.hitTest(b.x, b.y)).not.toBe(below);
+    world.clipViewport = false;
+    expect(t.game.hitTest(b.x, b.y)).toBe(below);
+  });
+
   it('visibleRectIn maps the camera view into a nested node', async () => {
     t = await createTestGame();
     const world = t.game.sceneLayer.add(new World());

@@ -326,6 +326,11 @@ export class Node {
     return lx >= -p && ly >= -p && lx < this.width + p && ly < this.height + p;
   }
 
+  /** Point in local space → false if this node's clipping hides its children there (no child hits). */
+  hitClip(lx: number, ly: number): boolean {
+    return !this.clip || (lx >= 0 && ly >= 0 && lx < this.width && ly < this.height);
+  }
+
   // ---------------------------------------------------------------- update
 
   /** Per-frame logic. Override in subclasses; dt is in seconds (already time-scaled). */

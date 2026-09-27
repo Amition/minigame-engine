@@ -33,7 +33,7 @@ const rectOf = (n: Node): Rect => ({ x: 0, y: 0, w: n.width, h: n.height });
  *     world.camera.follow(hero, { lerp: 8, deadzoneWidth: 120 });
  *     world.camera.bounds = { x: 0, y: 0, w: map.width, h: map.height };
  *
- * Note: children are hit-tested even where the viewport clips them; keep UI above the World in z-order.
+ * Children are hit-tested only inside the viewport (when `clipViewport` is on); keep UI above the World in z-order.
  */
 export class World extends Node {
   readonly camera: Camera2D;
@@ -52,6 +52,7 @@ export class World extends Node {
     this.cullMargin = opts.cullMargin ?? 32;
     this.clipViewport = opts.clipViewport ?? true;
     this.autoSize = !opts.width && !opts.height;
+    this.tags.add('lint-ignore');
     this.set(opts);
     this.syncViewport();
   }
@@ -102,6 +103,12 @@ export class World extends Node {
     const p = this.camera.worldToScreen(lx, ly);
     const pad = this.hitPadding;
     return p.x >= -pad && p.y >= -pad && p.x < this.width + pad && p.y < this.height + pad;
+  }
+
+  override hitClip(lx: number, ly: number): boolean {
+    if (!this.clipViewport && !this.clip) return true;
+    const p = this.camera.worldToScreen(lx, ly);
+    return p.x >= 0 && p.y >= 0 && p.x < this.width && p.y < this.height;
   }
 
   override tick(dt: number): void {

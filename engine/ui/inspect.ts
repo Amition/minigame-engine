@@ -270,7 +270,8 @@ function bgOf(n: Node): Bg | null {
 function collect(root: Node, ignore?: (n: Node) => boolean): Item[] {
   const items: Item[] = [];
   const visit = (n: Node, clip: Rect | null, alpha: number, disabled: boolean, decor: boolean) => {
-    if (!n.visible || n.destroyed || (ignore && n !== root && ignore(n))) return;
+    if (!n.visible || n.destroyed) return;
+    if (n !== root && (n.tags.has('lint-ignore') || (ignore && ignore(n)))) return;
     const a = alpha * n.alpha;
     const rect = n.worldBounds();
     const vis = clip ? intersect(rect, clip) : rect;

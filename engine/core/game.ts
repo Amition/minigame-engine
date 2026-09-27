@@ -388,7 +388,7 @@ function hitNode(node: Node, px: number, py: number): Node | null {
   if (!node.visible || node.destroyed) return null;
   const p = node.localMatrix(hitMat).invert().apply(px, py);
   const inside = node.hitTest(p.x, p.y);
-  if (node.clip && !(p.x >= 0 && p.y >= 0 && p.x < node.width && p.y < node.height)) return null;
+  if (!node.hitClip(p.x, p.y)) return null;
   if (node.interactiveChildren && node.children.length) {
     node.sortChildren();
     for (let i = node.children.length - 1; i >= 0; i--) {

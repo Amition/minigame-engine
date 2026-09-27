@@ -40,7 +40,10 @@ engine/            runtime engine, imported as '@engine' (engine/index.ts). Bund
                    assets + atlas loading, LoadingScene, SaveStore/settings, pools, StateMachine, fixedUpdate, events
   display/         Graphics (vector drawing), AnimatedSprite, NineSlice, TilingSprite, ParticleEmitter +
                    particlePresets/spawnParticles, MaskContainer, CacheContainer, Trail, ShadowBlob, Line, ArcProgress
-  world/           camera, parallax, tilemaps, isometric 2.5D, collision/physics
+  world/           World (camera container with culling) + Camera2D (follow/deadzone/shake), ParallaxLayer,
+                   TileMap (ASCII maps, autotile, chunk prerender), IsoMap/IsoObject (heights, picking),
+                   DepthSortLayer, GroundObject (z + shadow), PerspectiveRoad, PhysicsWorld/ArcadeBody,
+                   findGridPath (A*), distance fields, PathFollower
   ui/              flexbox layout, `ui.*` builder + buildUI(spec), widgets, modal/dialog/toast, themes,
                    inspectUI / lintUI / formatLint / drawUIBounds
   art/             palettes + colour ramps, pixelSprite, SVG parser/renderer (svgTexture), 22 shapes, 46 icons
@@ -80,6 +83,7 @@ tests/             cross-module tests
   font size (min 20). Tune per call with `lintUI(root, game, { rules: { 'small-font': 'off' } })`.
 - Plain nodes can declare a lint role by tag: `tags: ['lint-blocker']` for a hand-made backdrop (content under
   it is skipped), also `lint-decor`, `lint-surface`, `lint-control`. UI widgets set this themselves.
+  `lint-ignore` skips a whole subtree; every `World` has it (game-world content is not UI).
 
 ## Art and audio are code
 
