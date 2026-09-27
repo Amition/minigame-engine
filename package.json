@@ -1,7 +1,12 @@
 {
-  "name": "game",
+  "name": "minigame-engine",
   "private": true,
   "version": "0.1.0",
+  "description": "TypeScript 2D game engine (Canvas 2D) for WeChat / Douyin / TapTap / 233 mini-games and the web, built for AI coding agents",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Amition/minigame-engine.git" },
+  "homepage": "https://github.com/Amition/minigame-engine#readme",
+  "keywords": ["game-engine", "canvas", "minigame", "wechat-minigame", "douyin", "taptap", "typescript", "ai-agents"],
   "type": "module",
   "packageManager": "pnpm@11.13.1",
   "scripts": {

@@ -38,6 +38,7 @@ So every feature must be inspectable from code: text dumps, lint reports, headle
   Bake art with `bakeTexture(w, h, draw, { resolution: 'auto', key })` instead of a fixed resolution.
 - If `node_modules` is missing: `pnpm install --frozen-lockfile --prefer-offline`.
 - GitHub needs the local proxy: `git -c http.proxy=http://127.0.0.1:7890 ...` (npm registry works directly).
+  GitHub CLI: `gh` (portable install in `%LOCALAPPDATA%\Programs\gh\bin`, on the user PATH).
 
 ## Skills (read the matching one before starting a task)
 
