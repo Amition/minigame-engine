@@ -74,6 +74,7 @@ Options (`TestGameOptions`):
 | `tap(target)` | touch start, 1 frame, touch end, 1 frame. Target: selector, `Node` or `{ x, y }` stage point |
 | `press(target, seconds)` | holds, then releases (long press) |
 | `drag(from, to, steps = 12)` | start, `steps` moves (1 frame each), end |
+| `multiDrag([[from, to], ...], steps = 12)` | multi-touch: stroke i is pointer id i + 1; all press, move and lift in the same frames (two `onAim` zones, pinch) |
 | `go(scene, params?)` | switches scene and runs 1 frame |
 | `find(sel)` / `findAll(sel)` / `get(sel)` | selector queries; `get` throws with a stage dump when nothing matches |
 | `dump({ root?, maxDepth?, showHidden?, filter? })` | text outline with stage bounds and node props |
@@ -147,6 +148,9 @@ it('drops where the player taps and merges fruits', async () => {
 ```
 
 - Convert between spaces with `node.toWorld(x, y)` / `node.toLocal(x, y)`; tap targets are stage points.
+- Two players on one screen (one `onAim` zone each): `await t.multiDrag([[p1From, p1To], [p2From, p2To]], 40)`
+  drags both fingers at once. For staggered fingers inject raw touches yourself:
+  `t.platform.touch('start', [{ id: 2, ...t.game.stageToScreen(x, y) }])`, then `await t.step(1)`.
 - Force situations through the model instead of playing for minutes (e.g. add bodies near the top to test game
   over), then assert on UI: `openModalsOf().length`, `t.get('#again')`.
 - Lint the UI in the states you reach: `lintUI(t.game.stage, t.game)` with 0 errors.

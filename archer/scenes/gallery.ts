@@ -179,6 +179,7 @@ function fighter(spec: FighterSpec): FighterView & { stuck: StuckArrowView[] } {
   return {
     id: nextId++,
     side: spec.side ?? 'player',
+    hpBar: spec.side === 'enemy',
     scale: s,
     joints,
     facing,

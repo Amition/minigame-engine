@@ -100,6 +100,8 @@ export interface FighterView {
   readonly maxHp: number;
   readonly alive: boolean;
   readonly boss: boolean;
+  /** Small HP bar above the head while alive: AI enemies only (human archers show theirs in the HUD). */
+  readonly hpBar: boolean;
   /**
    * Armor points (0 = none; see damageTaken in config.ts). Drawn as gear: 1-2 a helmet, 3-5 helmet + chest plate,
    * 6+ helmet with visor + chest plate + shoulder guards.

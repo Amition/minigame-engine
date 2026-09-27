@@ -59,9 +59,11 @@ function everyStuck(x: number, y: number): StuckArrowView[] {
 
 function fighterView(over: Partial<FighterView> & { facing: 1 | -1 }): FighterView {
   const scale = over.scale ?? 1;
+  const side = over.side ?? (over.facing === 1 ? 'player' : 'enemy');
   return {
     id: 1,
-    side: over.facing === 1 ? 'player' : 'enemy',
+    side,
+    hpBar: side === 'enemy',
     scale,
     joints: skeleton(200, 200, over.facing, scale),
     aimAngle: over.facing === 1 ? 0 : Math.PI,

@@ -20,10 +20,7 @@ import {
   showRewardedAd,
   showToast,
   spawnParticles,
-  Sprite,
   stopSong,
-  Text,
-  tween,
   ui,
   wait,
   type AimInfo,
@@ -36,18 +33,8 @@ import { screenLayout, TOWER_TOP, TOWER_X, type ScreenLayout } from '../layout';
 import { BattleModel, launchSpeed, TOWER_W, type BattleEvent, type Fighter, type Platform } from '../model';
 import { addSkulls, archerSave, currentStats, loadout, recordRun, trials } from '../save';
 import { J } from '../types';
-import {
-  AimIndicator,
-  AppleLayer,
-  ArrowLayer,
-  Backdrop,
-  ExplosionNode,
-  FighterNode,
-  LightningNode,
-  PlatformNode,
-  StatBar,
-  TrajectoryPreview,
-} from './battle-view';
+import { BattleFx } from './battle-fx';
+import { AimIndicator, AppleLayer, ArrowLayer, Backdrop, FighterNode, PlatformNode, StatBar, TrajectoryPreview } from './battle-view';
 import { mountMenu, type MenuHandle } from './menu';
 
 export interface PlayParams {
@@ -55,9 +42,10 @@ export interface PlayParams {
 }
 
 /** Drag distance (scene units) for a full pull. */
-const PULL_DISTANCE = 220;
-const DEAD_ZONE = 10;
-const TOWER_HUD_W = 150;
+export const PULL_DISTANCE = 220;
+/** Drags shorter than this keep the current aim at zero pull. */
+export const DEAD_ZONE = 10;
+export const TOWER_HUD_W = 150;
 const SWITCH_W = 132;
 const SWITCH_H = 88;
 
@@ -75,6 +63,7 @@ export class PlayScene extends Scene {
   private zone!: Node;
   private indicator!: AimIndicator;
   private fxScreen!: Node;
+  private juice!: BattleFx;
   private towerHud!: Node;
   private switcher!: Node;
   private hpBar!: StatBar;
@@ -122,6 +111,7 @@ export class PlayScene extends Scene {
     this.switcher = this.add(new Node({ id: 'switcher-layer' }));
     this.indicator = this.add(new AimIndicator({ id: 'aim-indicator' }));
     this.fxScreen = this.add(new Node({ id: 'fx-screen' }));
+    this.juice = new BattleFx(this, this.field, this.fxLayer, this.fxScreen);
     this.relayout();
     this.sync();
 
@@ -391,6 +381,7 @@ export class PlayScene extends Scene {
 
   private handle(events: BattleEvent[]): void {
     for (const e of events) {
+      if (this.juice.world(e)) continue;
       switch (e.type) {
         case 'start':
           this.onStart();
@@ -404,41 +395,12 @@ export class PlayScene extends Scene {
         case 'hit':
           this.onHit(e);
           break;
-        case 'dot':
-          this.popupWorld(`-${Math.max(1, Math.round(e.damage))}`, e.x, e.y - 40, 34, COLORS.poison, '#1f3d12');
-          break;
-        case 'thunk':
-          playSound('thunk', { volume: 0.7, pitchJitter: 1 });
-          this.sparks(e.x, e.y, 6, [COLORS.stoneLight, COLORS.dustLight]);
-          break;
-        case 'explode':
-          this.explosion(e.x, e.y, e.radius);
-          break;
-        case 'zap':
-          playSound('zap');
-          this.fxLayer.add(new LightningNode(46, { x: e.x, y: e.y }));
-          break;
-        case 'poison':
-          playSound('poison');
-          this.sparks(e.x, e.y, 10, [COLORS.poison, '#b6f09c']);
-          break;
-        case 'balloon':
-          playSound('balloon', { rate: 0.9 + e.count * 0.1 });
-          if (e.lifted) this.popupWorld('飞走啦!', e.x, e.y - 80, 38, '#ffd166', '#7a3b00');
-          break;
-        case 'saw':
-          playSound('saw');
-          this.sparks(e.x, e.y, 14, [COLORS.spark, '#ffffff']);
-          break;
-        case 'split':
-          playSound('shoot', { rate: 1.4, volume: 0.35 });
-          break;
         case 'apple':
           this.onApple(e);
           break;
         case 'heal':
           playSound('heal', { volume: 0.8 });
-          this.popupWorld(`+${Math.round(e.amount)}`, e.x, e.y - 60, 36, COLORS.heal, '#1d4d23');
+          this.juice.popupWorld(`+${Math.round(e.amount)}`, e.x, e.y - 60, 36, COLORS.heal, '#1d4d23');
           break;
         case 'kill':
           this.onKill(e);
@@ -458,7 +420,7 @@ export class PlayScene extends Scene {
           playSound('deny');
           this.staminaBar.flashTime = 0.3;
           shake(this.staminaBar, 5, 0.25);
-          this.popupScreen('体力不足', this.staminaBar, COLORS.labelBlue);
+          this.juice.popupScreen('体力不足', this.staminaBar, COLORS.labelBlue);
           break;
         case 'equip':
           playSound('equip');
@@ -492,46 +454,34 @@ export class PlayScene extends Scene {
   }
 
   private onHit(e: Extract<BattleEvent, { type: 'hit' }>): void {
+    const fx = this.juice;
     if (e.corpse) {
       playSound('hit', { volume: 0.4, pitchJitter: 1 });
-      this.sparks(e.x, e.y, 6, [COLORS.spark]);
+      fx.sparks(e.x, e.y, 6, [COLORS.spark]);
       return;
     }
-    this.sparks(e.x, e.y, e.head ? 18 : 11, [COLORS.spark, COLORS.spark, '#ffd27a']);
+    fx.sparks(e.x, e.y, e.head ? 18 : 11, [COLORS.spark, COLORS.spark, '#ffd27a']);
+    if (e.armor > 0) playSound('clank', { pitchJitter: 1 });
     const dmg = Math.max(1, Math.round(e.damage));
     if (e.side === 'enemy') {
       playSound(e.head ? 'headshot' : 'hit', { pitchJitter: 1 });
-      this.popupWorld(`-${dmg}`, e.x, e.y - 30, e.head ? 44 : 36, '#ffffff', '#b45309');
-      if (e.head) this.popupWorld('爆头!', e.x, e.y - 90, 46, '#ffe066', '#c2410c');
+      fx.popupWorld(`-${dmg}`, e.x, e.y - 30, e.head ? 44 : 36, '#ffffff', '#b45309');
+      if (e.head) fx.popupWorld('爆头!', e.x, e.y - 90, 46, '#ffe066', '#c2410c');
       if (e.boss || e.head) shake(this.field, e.head ? 6 : 4, 0.18);
     } else {
       playSound('hurt');
       this.hpBar.flashTime = 0.25;
-      this.popupWorld(`-${dmg}`, e.x, e.y - 30, 36, '#ff8a8a', '#7f1d1d');
+      fx.popupWorld(`-${dmg}`, e.x, e.y - 30, 36, '#ff8a8a', '#7f1d1d');
       shake(this.field, e.head ? 10 : 6, 0.25);
-      if (e.head) this.popupWorld('爆头!', e.x, e.y - 90, 40, '#ff8a8a', '#7f1d1d');
+      if (e.head) fx.popupWorld('爆头!', e.x, e.y - 90, 40, '#ff8a8a', '#7f1d1d');
     }
   }
 
   private onApple(e: Extract<BattleEvent, { type: 'apple' }>): void {
     playSound('apple');
-    spawnParticles(
-      this.fxLayer,
-      {
-        bursts: [{ count: 16 }],
-        maxParticles: 20,
-        shape: 'circle',
-        speed: [150, 380],
-        gravity: 900,
-        drag: 1.5,
-        lifetime: [0.35, 0.7],
-        size: [6, 12],
-        colors: [e.kind === 'red' ? COLORS.hp : e.kind === 'green' ? COLORS.poison : '#f5c542', '#ffffff'],
-      },
-      { x: e.x, y: e.y },
-    );
+    this.juice.appleBurst(e.kind, e.x, e.y);
     const parts = [e.hp > 0 ? `生命 +${Math.round(e.hp)}` : '', e.stamina > 0 ? `体力 +${Math.round(e.stamina)}` : ''].filter(Boolean);
-    if (parts.length > 0) this.popupWorld(parts.join('  '), e.x, e.y - 40, 32, '#ffffff', e.kind === 'green' ? '#2d6a1f' : '#9b2c2c');
+    if (parts.length > 0) this.juice.popupWorld(parts.join('  '), e.x, e.y - 40, 32, '#ffffff', e.kind === 'green' ? '#2d6a1f' : '#9b2c2c');
     if (e.stamina > 0) this.staminaBar.flashTime = 0.2;
   }
 
@@ -542,9 +492,14 @@ export class PlayScene extends Scene {
     punch(this.scoreLabel, 1.15, 0.25);
     if (e.boss) {
       shake(this.field, 16, 0.5);
-      this.popupWorld('击败首领!', e.x, e.y - 120, 52, '#ffe066', '#9a3412');
+      this.juice.popupWorld('击败首领!', e.x, e.y - 120, 52, '#ffe066', '#9a3412');
     }
-    this.flySkulls(e.reward, e.x, e.y);
+    this.juice.flySkulls(e.reward, e.x, e.y, this.skullRow.children[0], () => {
+      this.shownSkulls += e.reward;
+      this.skullLabel.text = String(this.shownSkulls);
+      punch(this.skullRow, 1.2, 0.25);
+      playSound('coin');
+    });
   }
 
   private onArrive(boss: boolean): void {
@@ -554,90 +509,12 @@ export class PlayScene extends Scene {
     }
     playSound('boss');
     shake(this.field, 8, 0.4);
-    const t = this.fxScreen.add(
-      new Text('首领来袭', { fontSize: 76, fontWeight: 'bold', color: '#ffffff', stroke: { color: COLORS.hp, width: 12 } }, {
-        x: this.width / 2,
-        y: this.height * 0.3,
-        anchor: 0.5,
-      }),
-    );
-    popIn(t, 0.4);
-    tween(t, { alpha: 0 }, 0.5, { delay: 1.5, owner: this, onComplete: () => t.destroy() });
-  }
-
-  // ---------------------------------------------------------------- juice
-
-  private sparks(x: number, y: number, count: number, colors: string[]): void {
-    spawnParticles(
-      this.fxLayer,
-      {
-        bursts: [{ count }],
-        maxParticles: count + 4,
-        shape: 'circle',
-        speed: [140, 420],
-        gravity: 1100,
-        drag: 2,
-        lifetime: [0.25, 0.6],
-        size: [5, 9],
-        colors,
-      },
-      { x, y },
-    );
-  }
-
-  private explosion(x: number, y: number, radius: number): void {
-    playSound('explode');
-    const n = this.fxLayer.add(new ExplosionNode(radius, { x, y }));
-    tween(n, { progress: 1 }, 0.45, { ease: 'quadOut', owner: this, onComplete: () => n.destroy() });
-    spawnParticles(this.fxLayer, 'explosion', { x, y, maxParticles: 40 });
-    this.sparks(x, y, 20, [COLORS.spark, '#ffb347', '#ffffff']);
-    shake(this.field, radius > 100 ? 14 : 9, 0.35);
-  }
-
-  /** Floating text in world units (inside the field). */
-  private popupWorld(text: string, x: number, y: number, size: number, color: string, stroke: string): void {
-    const t = this.fxLayer.add(new Text(text, { fontSize: size, fontWeight: 'bold', color, stroke: { color: stroke, width: 7 } }, { x, y, anchor: 0.5 }));
-    t.zIndex = 10;
-    popIn(t, 0.18);
-    tween(t, { y: y - 70, alpha: 0 }, 0.8, { delay: 0.35, ease: 'quadIn', owner: this, onComplete: () => t.destroy() });
+    this.juice.banner('首领来袭', COLORS.hp);
   }
 
   private popupPlayer(text: string, color: string): void {
     const h = this.model.player.body.pos[J.head]!;
-    this.popupWorld(text, h.x, h.y - 60, 44, color, '#1f1f22');
-  }
-
-  /** Floating text next to a HUD node (scene units). */
-  private popupScreen(text: string, near: Node, color: string): void {
-    const c = near.worldCenter();
-    const p = this.fxScreen.toLocal(c.x, c.y);
-    const t = this.fxScreen.add(new Text(text, { fontSize: 28, fontWeight: 'bold', color, stroke: { color: '#111114', width: 6 } }, { x: p.x, y: p.y - 44, anchor: 0.5 }));
-    popIn(t, 0.15);
-    tween(t, { y: p.y - 90, alpha: 0 }, 0.7, { delay: 0.3, owner: this, onComplete: () => t.destroy() });
-  }
-
-  /** '+N' skulls flying from the kill to the counter; the counter ticks up when they land. */
-  private flySkulls(reward: number, wx: number, wy: number): void {
-    const from = this.field.toWorld(wx, wy);
-    const to = this.skullRow.children[0]?.worldCenter() ?? { x: 60, y: 40 };
-    const a = this.fxScreen.toLocal(from.x, from.y);
-    const b = this.fxScreen.toLocal(to.x, to.y);
-    const g = this.fxScreen.add(new Node({ x: a.x, y: a.y - 40 }));
-    g.add(new Sprite(ART_KEYS.skull, { anchor: 0.5, width: 44, height: 44 }));
-    g.add(new Text(`+${reward}`, { fontSize: 34, fontWeight: 'bold', color: '#ffffff', stroke: { color: '#3b3b3d', width: 6 } }, { x: 28, y: 0, anchorY: 0.5 }));
-    popIn(g, 0.25);
-    tween(g, { x: b.x, y: b.y, scale: 0.6 }, 0.65, {
-      delay: 0.5,
-      ease: 'quadIn',
-      owner: this,
-      onComplete: () => {
-        g.destroy();
-        this.shownSkulls += reward;
-        this.skullLabel.text = String(this.shownSkulls);
-        punch(this.skullRow, 1.2, 0.25);
-        playSound('coin');
-      },
-    });
+    this.juice.popupWorld(text, h.x, h.y - 60, 44, color, '#1f1f22');
   }
 
   // ---------------------------------------------------------------- pause / game over

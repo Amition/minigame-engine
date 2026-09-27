@@ -87,6 +87,21 @@ export const ENEMY = {
 /** Boss multipliers on the normal enemy formulas. */
 export const BOSS = { hp: 2, damage: 1.2, aim: 0.6, scale: 1.6, reward: 5 } as const;
 
+/** Versus: round wins that take the match (best of 5). */
+export const ROUNDS_TO_WIN = 3;
+/** Versus: seconds from a round's deciding death to the next round. */
+export const ROUND_PAUSE = 2.4;
+/** Versus: P2's tower, the mirror of the player's. */
+export const VERSUS_TOWER_X = WORLD_W - TOWER_X;
+/**
+ * Co-op: P1 on a taller, narrower back tower, P2 on the solo tower in front (centre x, top y, width). The back
+ * archer shoots over the front one's head; arrows pass through teammates anyway.
+ */
+export const COOP_TOWERS: readonly { x: number; top: number; w: number }[] = [
+  { x: 190, top: 500, w: 200 },
+  { x: 440, top: TOWER_TOP, w: TOWER_W },
+];
+
 const IMPULSE = 300;
 const ARROW_OUT = 300;
 const SPECIAL_ARROWS: readonly ArrowId[] = ['poison', 'electric', 'explosive'];
@@ -169,18 +184,44 @@ export function solveLaunchAngle(dx: number, dy: number, v: number, g = ARROW_GR
 // ---------------------------------------------------------------- events
 
 export type Side = 'player' | 'enemy';
+/**
+ * solo: one human vs the AI enemy series (starts in the menu). versus: human 0 on the left tower vs human 1 on the
+ * mirrored right tower (side 'enemy', no AI), best of 5 rounds. coop: two humans on side 'player' vs the enemy series.
+ */
+export type BattleMode = 'solo' | 'versus' | 'coop';
+/** Index of a human archer: 0 = P1 (the solo player), 1 = P2. */
+export type Who = 0 | 1;
 
+/**
+ * `who` names the human concerned (the actor for draw / shoot / jump..., the victim for hit / dot) and is null for
+ * the AI enemies; `by` on hits is the human who shot the arrow.
+ */
 export type BattleEvent =
   | { type: 'start' }
-  | { type: 'draw'; side: Side }
-  | { type: 'shoot'; side: Side; arrow: ArrowId; power: number; x: number; y: number }
+  | { type: 'draw'; side: Side; who: Who | null }
+  | { type: 'shoot'; side: Side; arrow: ArrowId; power: number; x: number; y: number; who: Who | null }
   /**
    * An arrow (or blast) hit a body. side = the victim. corpse = it was already dead (no damage). armor = the victim's
    * armor points (damage is already reduced by it).
    */
-  | { type: 'hit'; side: Side; x: number; y: number; damage: number; head: boolean; arrow: ArrowId; kill: boolean; boss: boolean; corpse: boolean; blast: boolean; armor: number }
+  | {
+      type: 'hit';
+      side: Side;
+      x: number;
+      y: number;
+      damage: number;
+      head: boolean;
+      arrow: ArrowId;
+      kill: boolean;
+      boss: boolean;
+      corpse: boolean;
+      blast: boolean;
+      armor: number;
+      who: Who | null;
+      by: Who | null;
+    }
   /** Damage over time (poison), reported about once per second. */
-  | { type: 'dot'; side: Side; x: number; y: number; damage: number }
+  | { type: 'dot'; side: Side; x: number; y: number; damage: number; who: Who | null }
   | { type: 'thunk'; x: number; y: number; arrow: ArrowId; platform: 'tower' | 'block' }
   | { type: 'explode'; x: number; y: number; radius: number; side: Side }
   | { type: 'zap'; side: Side; x: number; y: number }
@@ -188,18 +229,27 @@ export type BattleEvent =
   | { type: 'balloon'; side: Side; x: number; y: number; count: number; lifted: boolean }
   | { type: 'saw'; side: Side; x: number; y: number }
   | { type: 'split'; x: number; y: number }
-  | { type: 'apple'; kind: AppleKind; x: number; y: number; hp: number; stamina: number }
-  | { type: 'heal'; amount: number; x: number; y: number }
+  /** An apple was shot; hp / stamina went to its shooter `who`. */
+  | { type: 'apple'; kind: AppleKind; x: number; y: number; hp: number; stamina: number; who: Who }
+  | { type: 'heal'; amount: number; x: number; y: number; who: Who }
   | { type: 'kill'; reward: number; boss: boolean; x: number; y: number; index: number; balloon: boolean }
   | { type: 'arrive'; boss: boolean; index: number }
-  | { type: 'jump' }
-  | { type: 'land' }
-  | { type: 'noStamina' }
-  | { type: 'equip'; arrow: ArrowId }
-  | { type: 'lifeLost'; livesLeft: number }
-  | { type: 'respawn' }
+  | { type: 'jump'; who: Who }
+  | { type: 'land'; who: Who }
+  | { type: 'noStamina'; who: Who }
+  | { type: 'equip'; arrow: ArrowId; who: Who }
+  | { type: 'lifeLost'; livesLeft: number; who: Who }
+  | { type: 'respawn'; who: Who }
+  /** Co-op: a human lost the last life while the partner fights on. */
+  | { type: 'out'; who: Who }
   | { type: 'gameover'; score: number; skulls: number }
-  | { type: 'revive' };
+  | { type: 'revive' }
+  /** Versus: a round begins (1-based); both archers are fresh. */
+  | { type: 'roundStart'; round: number }
+  /** Versus: `winner` took the round; score = round wins [P1, P2] after it. */
+  | { type: 'roundOver'; round: number; winner: Who; score: [number, number] }
+  /** Versus: the match is decided (state is 'over'). */
+  | { type: 'matchOver'; winner: Who; score: [number, number] };
 
 export type BattleState = 'menu' | 'playing' | 'over';
 
@@ -240,6 +290,10 @@ export class Fighter implements FighterView {
   knocked = 0;
   poisonAcc = 0;
   poisonTick = 0;
+  /** The controller of a human archer; null for AI enemies. */
+  human: Human | null = null;
+  /** Enemy AI: the human it draws on (picked at each draw). */
+  target: Human | null = null;
 
   constructor(
     readonly id: number,
@@ -276,6 +330,9 @@ export class Fighter implements FighterView {
   /** Floating away on balloons. */
   get lifted(): boolean {
     return this.body.balloons >= this.body.liftAt;
+  }
+  get hpBar(): boolean {
+    return this.human === null;
   }
 }
 
@@ -329,6 +386,8 @@ export class Arrow implements ArrowView {
     readonly power: number,
     /** Damage of a body hit before the headshot multiplier (and the player's armor for enemy arrows). */
     readonly base: number,
+    /** The human who shot it; null for AI arrows. */
+    readonly who: Who | null = null,
   ) {
     this.angle = Math.atan2(vy, vx);
   }
@@ -353,64 +412,178 @@ export class Apple implements AppleView {
   ) {}
 }
 
+/** Controller state of one human archer: its fighter and tower, stats, loadout, stamina, lives and bow. */
+export class Human {
+  stats: PlayerStats;
+  loadout: ArrowId[];
+  selected: ArrowId;
+  stamina: number;
+  livesLeft: number;
+  /** Bow state: drawing toward pullTarget (0..1). */
+  drawing = false;
+  pullTarget = 0;
+  /** Seconds until the next arrow is nocked after a shot. */
+  renock = 0;
+  /** Shots fired and hits landed (stats / tests). */
+  shots = 0;
+  hits = 0;
+
+  constructor(
+    readonly who: Who,
+    readonly fighter: Fighter,
+    readonly tower: Platform,
+    stats: PlayerStats,
+    loadout: readonly ArrowId[],
+  ) {
+    this.stats = stats;
+    this.loadout = [...loadout];
+    this.selected = this.loadout[0]!;
+    this.stamina = stats.maxStamina;
+    this.livesLeft = stats.lives;
+    fighter.human = this;
+  }
+
+  get maxStamina(): number {
+    return this.stats.maxStamina;
+  }
+}
+
 // ---------------------------------------------------------------- model
 
 export interface BattleOptions {
   seed?: number;
+  /** Default 'solo'. */
+  mode?: BattleMode;
+  /** Stats and loadout of every human (versus / co-op: both use the same). */
   stats?: PlayerStats;
   loadout?: readonly ArrowId[];
 }
 
 export class BattleModel {
   readonly rng: Rng;
+  readonly mode: BattleMode;
   state: BattleState = 'menu';
-  stats: PlayerStats;
-  loadout: ArrowId[];
-  selected: ArrowId;
   readonly fighters: Fighter[] = [];
   readonly platforms: Platform[] = [];
   arrows: Arrow[] = [];
   apples: Apple[] = [];
+  /** Human archers: [P1] in solo, [P1, P2] in versus and co-op. */
+  readonly humans: Human[] = [];
+  /** Human 0's fighter and tower. */
   readonly player: Fighter;
   readonly tower: Platform;
-  /** The current opponent (alive or dying), null between enemies. */
+  /** The current AI opponent (alive or dying), null between enemies and in versus. */
   enemy: Fighter | null = null;
-  stamina: number;
-  livesLeft: number;
+  /** Kills (solo / co-op, shared). */
   score = 0;
   skullsEarned = 0;
   enemyIndex = 0;
   time = 0;
-  /** Player bow state. */
-  drawing = false;
-  pullTarget = 0;
-  /** Shots fired and hits landed by the player (stats / tests). */
-  shots = 0;
-  hits = 0;
+  /** Versus: current round (1-based) and round wins [P1, P2]; winner once the match is over. */
+  round = 0;
+  readonly roundScore: [number, number] = [0, 0];
+  winner: Who | null = null;
   private nextId = 1;
   private pending: BattleEvent[] = [];
   private appleTimer: number;
   private nextEnemyIn = -1;
-  private renock = 0;
+  /** Versus: seconds until the next round starts (> 0 between rounds; nobody acts or takes damage). */
+  private intermission = 0;
 
   constructor(opts: BattleOptions = {}) {
     this.rng = new Rng(opts.seed ?? 1);
-    this.stats = opts.stats ?? playerStats(NO_UPGRADES);
-    this.loadout = opts.loadout && opts.loadout.length > 0 ? [...opts.loadout] : ['normal'];
-    this.selected = this.loadout[0]!;
-    this.stamina = this.stats.maxStamina;
-    this.livesLeft = this.stats.lives;
-    this.tower = this.addPlatform('tower', TOWER_X, TOWER_TOP + TOWER_H / 2, TOWER_W, TOWER_H, 0);
-    const body = new Ragdoll({ x: TOWER_X, y: TOWER_TOP, facing: 1, aimAngle: 0 });
-    this.player = new Fighter(this.id(), 'player', body, this.stats.maxHp, false, null, this.tower, this.selected);
-    this.player.armor = this.stats.armor;
-    this.fighters.push(this.player);
-    this.spawnEnemy(0, MENU_ENEMY_X, MENU_ENEMY_TOP, false);
+    this.mode = opts.mode ?? 'solo';
+    const stats = opts.stats ?? playerStats(NO_UPGRADES);
+    const loadout: readonly ArrowId[] = opts.loadout && opts.loadout.length > 0 ? opts.loadout : ['normal'];
+    if (this.mode === 'versus') {
+      this.addHuman(0, 'player', TOWER_X, TOWER_TOP, TOWER_W, 1, stats, loadout);
+      this.addHuman(1, 'enemy', VERSUS_TOWER_X, TOWER_TOP, TOWER_W, -1, stats, loadout);
+    } else if (this.mode === 'coop') {
+      for (const who of [0, 1] as const) {
+        const t = COOP_TOWERS[who]!;
+        this.addHuman(who, 'player', t.x, t.top, t.w, 1, stats, loadout);
+      }
+    } else {
+      this.addHuman(0, 'player', TOWER_X, TOWER_TOP, TOWER_W, 1, stats, loadout);
+    }
+    this.player = this.humans[0]!.fighter;
+    this.tower = this.humans[0]!.tower;
+    if (this.mode === 'solo') this.spawnEnemy(0, MENU_ENEMY_X, MENU_ENEMY_TOP, false);
     this.appleTimer = this.rng.float(APPLE_EVERY[0], APPLE_EVERY[1]) * 0.6;
+    if (this.mode === 'versus') {
+      this.state = 'playing';
+      this.emit({ type: 'start' });
+      this.round = 1;
+      this.emit({ type: 'roundStart', round: 1 });
+    } else if (this.mode === 'coop') {
+      this.state = 'playing';
+      this.emit({ type: 'start' });
+      this.spawnEnemy(0, MENU_ENEMY_X, MENU_ENEMY_TOP, true);
+      this.emit({ type: 'arrive', boss: false, index: 0 });
+    }
+  }
+
+  // ---------------------------------------------------------------- solo accessors (human 0)
+
+  get stats(): PlayerStats {
+    return this.humans[0]!.stats;
+  }
+  set stats(v: PlayerStats) {
+    this.humans[0]!.stats = v;
+  }
+  get loadout(): ArrowId[] {
+    return this.humans[0]!.loadout;
+  }
+  set loadout(v: ArrowId[]) {
+    this.humans[0]!.loadout = v;
+  }
+  get selected(): ArrowId {
+    return this.humans[0]!.selected;
+  }
+  set selected(v: ArrowId) {
+    this.humans[0]!.selected = v;
+  }
+  get stamina(): number {
+    return this.humans[0]!.stamina;
+  }
+  set stamina(v: number) {
+    this.humans[0]!.stamina = v;
+  }
+  get livesLeft(): number {
+    return this.humans[0]!.livesLeft;
+  }
+  set livesLeft(v: number) {
+    this.humans[0]!.livesLeft = v;
+  }
+  /** Player bow state. */
+  get drawing(): boolean {
+    return this.humans[0]!.drawing;
+  }
+  set drawing(v: boolean) {
+    this.humans[0]!.drawing = v;
+  }
+  get pullTarget(): number {
+    return this.humans[0]!.pullTarget;
+  }
+  set pullTarget(v: number) {
+    this.humans[0]!.pullTarget = v;
+  }
+  /** Shots fired and hits landed by the player (stats / tests). */
+  get shots(): number {
+    return this.humans[0]!.shots;
+  }
+  get hits(): number {
+    return this.humans[0]!.hits;
   }
 
   // ---------------------------------------------------------------- views
 
+  /** The controller of human `who` (P2 exists in versus and co-op only). */
+  human(who: Who = 0): Human {
+    const h = this.humans[who];
+    if (!h) throw new Error(`no human ${who} in ${this.mode} mode`);
+    return h;
+  }
   get hp(): number {
     return this.player.hp;
   }
@@ -422,6 +595,10 @@ export class BattleModel {
   }
   get draw(): number {
     return this.player.body.draw;
+  }
+  /** Versus: between rounds (the round is decided, the next one starts soon). */
+  get betweenRounds(): boolean {
+    return this.intermission > 0;
   }
   get fighterViews(): readonly FighterView[] {
     return this.fighters;
@@ -437,7 +614,13 @@ export class BattleModel {
   }
   /** The player can act (not knocked down, stunned or dead). */
   get canAct(): boolean {
-    return this.state !== 'over' && this.player.alive && this.player.knocked <= 0 && this.player.stun <= 0;
+    return this.canActFor(0);
+  }
+
+  /** Human `who` can act: alive, not knocked down or stunned, the game not over and (versus) the round live. */
+  canActFor(who: Who): boolean {
+    const f = this.humans[who]?.fighter;
+    return !!f && this.state !== 'over' && f.alive && f.knocked <= 0 && f.stun <= 0 && this.intermission <= 0;
   }
 
   // ---------------------------------------------------------------- input
@@ -456,73 +639,84 @@ export class BattleModel {
   }
 
   /** Starts drawing the bow; the first draw in the menu starts the run. Returns false when it can't. */
-  beginDraw(): boolean {
-    if (!this.canAct || this.drawing) return false;
-    if (this.stamina < SHOT_COST) {
-      this.emit({ type: 'noStamina' });
+  beginDraw(who: Who = 0): boolean {
+    const h = this.humans[who];
+    if (!h || !this.canActFor(who) || h.drawing) return false;
+    if (h.stamina < SHOT_COST) {
+      this.emit({ type: 'noStamina', who });
       return false;
     }
     if (this.state === 'menu') this.startRun();
-    this.drawing = true;
-    this.pullTarget = 0;
-    this.player.body.draw = 0;
-    this.emit({ type: 'draw', side: 'player' });
+    h.drawing = true;
+    h.pullTarget = 0;
+    h.fighter.body.draw = 0;
+    this.emit({ type: 'draw', side: h.fighter.side, who });
     return true;
   }
 
-  /** Aim angle (radians, y down; clamped to AIM_MIN..AIM_MAX) and pull 0..1 (the draw grows toward it). */
-  aim(angle: number, pull: number): void {
-    if (this.state === 'over' || !this.player.alive) return;
-    this.player.body.aimAngle = clamp(normalizeAngle(angle), AIM_MIN, AIM_MAX);
-    this.pullTarget = clamp01(pull);
+  /**
+   * Aim angle (radians, y down) and pull 0..1 (the draw grows toward it). The angle is clamped to AIM_MIN..AIM_MAX,
+   * mirrored for an archer facing left.
+   */
+  aim(angle: number, pull: number, who: Who = 0): void {
+    const h = this.humans[who];
+    if (!h || this.state === 'over' || !h.fighter.alive) return;
+    h.fighter.body.aimAngle = clampAim(angle, h.fighter.facing);
+    h.pullTarget = clamp01(pull);
   }
 
   /** Lets go: fires when drawn at least MIN_DRAW, else cancels. Returns true when an arrow flew. */
-  release(): boolean {
-    if (!this.drawing) return false;
-    this.drawing = false;
-    const draw = this.player.body.draw;
-    this.player.body.draw = 0;
-    if (draw < MIN_DRAW || !this.canAct || this.stamina < SHOT_COST) return false;
-    this.stamina -= SHOT_COST;
-    const type = this.selected;
-    const base = this.stats.damage * arrowDef(type).damageMul * (0.5 + 0.5 * draw);
-    this.fire(this.player, type, this.player.body.aimAngle, launchSpeed(draw), draw, base);
-    this.shots++;
-    this.renock = 0.25;
+  release(who: Who = 0): boolean {
+    const h = this.humans[who];
+    if (!h || !h.drawing) return false;
+    h.drawing = false;
+    const body = h.fighter.body;
+    const draw = body.draw;
+    body.draw = 0;
+    if (draw < MIN_DRAW || !this.canActFor(who) || h.stamina < SHOT_COST) return false;
+    h.stamina -= SHOT_COST;
+    const type = h.selected;
+    const base = h.stats.damage * arrowDef(type).damageMul * (0.5 + 0.5 * draw);
+    this.fire(h.fighter, type, body.aimAngle, launchSpeed(draw), draw, base, who);
+    h.shots++;
+    h.renock = 0.25;
     return true;
   }
 
-  cancelDraw(): void {
-    this.drawing = false;
-    this.player.body.draw = 0;
+  cancelDraw(who: Who = 0): void {
+    const h = this.humans[who];
+    if (!h) return;
+    h.drawing = false;
+    h.fighter.body.draw = 0;
   }
 
   /** Hop to dodge (JUMP_COST stamina). */
-  jump(): boolean {
-    if (this.state !== 'playing' || !this.canAct || !this.player.body.grounded) return false;
-    if (this.stamina < JUMP_COST) {
-      this.emit({ type: 'noStamina' });
+  jump(who: Who = 0): boolean {
+    const h = this.humans[who];
+    if (!h || this.state !== 'playing' || !this.canActFor(who) || !h.fighter.body.grounded) return false;
+    if (h.stamina < JUMP_COST) {
+      this.emit({ type: 'noStamina', who });
       return false;
     }
-    this.stamina -= JUMP_COST;
-    this.player.body.jump(JUMP_SPEED);
-    this.emit({ type: 'jump' });
+    h.stamina -= JUMP_COST;
+    h.fighter.body.jump(JUMP_SPEED);
+    this.emit({ type: 'jump', who });
     return true;
   }
 
   /** Switches the arrow type (only types in the loadout). */
-  selectArrow(id: ArrowId): boolean {
-    if (!this.loadout.includes(id) || id === this.selected) return false;
-    this.selected = id;
-    if (this.player.nocked) this.player.nocked = id;
-    this.emit({ type: 'equip', arrow: id });
+  selectArrow(id: ArrowId, who: Who = 0): boolean {
+    const h = this.humans[who];
+    if (!h || !h.loadout.includes(id) || id === h.selected) return false;
+    h.selected = id;
+    if (h.fighter.nocked) h.fighter.nocked = id;
+    this.emit({ type: 'equip', arrow: id, who });
     return true;
   }
 
-  /** Rewarded-ad revive after game over: full HP and stamina, back to playing. */
+  /** Rewarded-ad revive after a solo game over: full HP and stamina, back to playing. */
   revive(): boolean {
-    if (this.state !== 'over') return false;
+    if (this.state !== 'over' || this.mode !== 'solo') return false;
     const p = this.player;
     this.state = 'playing';
     p.alive = true;
@@ -540,17 +734,24 @@ export class BattleModel {
     return true;
   }
 
-  /** Gives up the run (pause menu): ends it like a death. */
+  /** Gives up (pause menu): solo / co-op end like a death of every human; a versus match just stops undecided. */
   forfeit(): void {
     if (this.state === 'over') return;
-    this.livesLeft = 1;
-    this.player.knocked = 0;
-    this.playerDies();
+    if (this.mode === 'versus') {
+      for (const h of this.humans) this.cancelDraw(h.who);
+      this.state = 'over';
+      return;
+    }
+    for (const h of this.humans) {
+      h.livesLeft = Math.min(h.livesLeft, 1);
+      h.fighter.knocked = 0;
+      this.humanDies(h);
+    }
   }
 
-  /** Launch angle for the player's bow to hit (x, y) at the given draw, or null when out of range. */
-  aimAt(x: number, y: number, draw = 1): number | null {
-    return this.aimFrom(this.player, x, y, launchSpeed(draw));
+  /** Launch angle for a human's bow to hit (x, y) at the given draw, or null when out of range. */
+  aimAt(x: number, y: number, draw = 1, who: Who = 0): number | null {
+    return this.aimFrom(this.human(who).fighter, x, y, launchSpeed(draw));
   }
 
   /** Where an arrow shot by this fighter at `angle` starts (tip position). */
@@ -572,14 +773,13 @@ export class BattleModel {
 
   step(dt: number): BattleEvent[] {
     this.time += dt;
-    const p = this.player;
-    this.updatePlayer(dt);
+    for (const h of this.humans) this.updateHuman(h, dt);
     for (const f of this.fighters) {
       if (f.removed) continue;
-      if (f !== p) this.updateEnemy(f, dt);
+      if (!f.human) this.updateEnemy(f, dt);
       this.updateStatus(f, dt);
       if (f.removed) continue;
-      if (f.body.step(dt, this.platforms, BALLOON_LIFT) && f === p) this.emit({ type: 'land' });
+      if (f.body.step(dt, this.platforms, BALLOON_LIFT) && f.human) this.emit({ type: 'land', who: f.human.who });
       this.syncStuck(f);
     }
     this.stepArrows(dt);
@@ -591,10 +791,15 @@ export class BattleModel {
         this.nextEnemyIn -= dt;
         if (this.nextEnemyIn <= 0) this.nextEnemy();
       }
-      this.appleTimer -= dt;
-      if (this.appleTimer <= 0) {
-        this.spawnApple();
-        this.appleTimer = this.rng.float(APPLE_EVERY[0], APPLE_EVERY[1]);
+      if (this.intermission > 0) {
+        this.intermission -= dt;
+        if (this.intermission <= 0) this.startRound();
+      } else {
+        this.appleTimer -= dt;
+        if (this.appleTimer <= 0) {
+          this.spawnApple();
+          this.appleTimer = this.rng.float(APPLE_EVERY[0], APPLE_EVERY[1]);
+        }
       }
     }
     const events = this.pending;
@@ -602,7 +807,18 @@ export class BattleModel {
     return events;
   }
 
-  // ---------------------------------------------------------------- player / enemies
+  // ---------------------------------------------------------------- humans / enemies
+
+  private addHuman(who: Who, side: Side, x: number, top: number, w: number, facing: 1 | -1, stats: PlayerStats, loadout: readonly ArrowId[]): Human {
+    const tower = this.addPlatform('tower', x, top + TOWER_H / 2, w, TOWER_H, 0);
+    const body = new Ragdoll({ x, y: top, facing, aimAngle: facing === 1 ? 0 : Math.PI });
+    const f = new Fighter(this.id(), side, body, stats.maxHp, false, null, tower, loadout[0]!);
+    f.armor = stats.armor;
+    this.fighters.push(f);
+    const h = new Human(who, f, tower, stats, loadout);
+    this.humans.push(h);
+    return h;
+  }
 
   private startRun(): void {
     this.state = 'playing';
@@ -610,8 +826,43 @@ export class BattleModel {
     this.emit({ type: 'start' });
   }
 
-  private updatePlayer(dt: number): void {
-    const p = this.player;
+  /** Versus: both archers fresh on their towers, no arrows in the air or stuck anywhere. */
+  private startRound(): void {
+    this.intermission = 0;
+    this.round++;
+    for (const h of this.humans) {
+      const p = h.fighter;
+      p.alive = true;
+      p.hp = p.maxHp;
+      p.poison = p.stun = p.knocked = p.flash = 0;
+      p.poisonAcc = p.poisonTick = 0;
+      p.pins.length = 0;
+      p.stuck.length = 0;
+      p.body.stiffness = 1;
+      p.body.grounded = true;
+      p.body.balloons = 0;
+      p.body.draw = 0;
+      p.body.aimAngle = p.facing === 1 ? 0 : Math.PI;
+      p.body.reset();
+      p.nocked = h.selected;
+      h.stamina = h.stats.maxStamina;
+      h.drawing = false;
+      h.pullTarget = 0;
+      h.renock = 0;
+    }
+    for (const pl of this.platforms) {
+      pl.pins.length = 0;
+      pl.stuck.length = 0;
+    }
+    this.arrows = [];
+    this.apples = [];
+    this.appleTimer = this.rng.float(APPLE_EVERY[0], APPLE_EVERY[1]) * 0.6;
+    this.emit({ type: 'roundStart', round: this.round });
+  }
+
+  private updateHuman(h: Human, dt: number): void {
+    const p = h.fighter;
+    const who = h.who;
     if (!p.alive) return;
     if (p.knocked > 0) {
       p.knocked -= dt;
@@ -620,52 +871,60 @@ export class BattleModel {
         p.knocked = 0;
         p.body.stiffness = 1;
         p.hp = p.maxHp;
-        this.stamina = this.stats.maxStamina;
-        this.emit({ type: 'respawn' });
+        h.stamina = h.stats.maxStamina;
+        this.emit({ type: 'respawn', who });
       }
       return;
     }
-    if (this.drawing) {
+    if (h.drawing) {
       const b = p.body;
-      if (!this.canAct) {
-        this.cancelDraw();
-      } else if (b.draw < this.pullTarget) {
-        b.draw = Math.min(this.pullTarget, b.draw + dt / this.stats.drawTime);
+      if (!this.canActFor(who)) {
+        this.cancelDraw(who);
+      } else if (b.draw < h.pullTarget) {
+        b.draw = Math.min(h.pullTarget, b.draw + dt / h.stats.drawTime);
       } else {
-        b.draw = this.pullTarget;
+        b.draw = h.pullTarget;
       }
     }
     if (this.state !== 'over') {
-      this.stamina = Math.min(this.stats.maxStamina, this.stamina + this.stats.regen * dt * (this.drawing ? 0.5 : 1));
+      h.stamina = Math.min(h.stats.maxStamina, h.stamina + h.stats.regen * dt * (h.drawing ? 0.5 : 1));
     }
-    if (this.renock > 0) {
-      this.renock -= dt;
-      p.nocked = this.renock > 0 ? null : this.selected;
+    if (h.renock > 0) {
+      h.renock -= dt;
+      p.nocked = h.renock > 0 ? null : h.selected;
     }
+  }
+
+  /** A human the AI may shoot at: alive and not knocked down. */
+  private targetable(h: Human): boolean {
+    return h.fighter.alive && h.fighter.knocked <= 0;
   }
 
   private updateEnemy(e: Fighter, dt: number): void {
     const spec = e.spec!;
     const b = e.body;
-    const target = this.player;
-    const canShoot =
-      this.state === 'playing' && e.alive && e.arrived && b.grounded && !e.lifted && target.alive && target.knocked <= 0 && e.stun <= 0;
+    const pool = this.humans.filter((h) => this.targetable(h));
+    const look = (e.target && e.target.fighter.alive ? e.target : (pool[0] ?? this.humans[0]!)).fighter;
+    const ready = this.state === 'playing' && e.alive && e.arrived && b.grounded && !e.lifted && e.stun <= 0;
+    const canShoot = ready && (e.drawing ? !!e.target && this.targetable(e.target) : pool.length > 0);
     if (!canShoot) {
       e.drawing = false;
       b.draw = Math.max(0, b.draw - dt * 3);
-      if (e.alive) b.aimAngle += (restAngle(this.state, e, target) - b.aimAngle) * Math.min(1, dt * 4);
+      if (e.alive) b.aimAngle += (restAngle(this.state, e, look) - b.aimAngle) * Math.min(1, dt * 4);
       return;
     }
     if (!e.drawing) {
       e.cooldown -= dt;
-      b.aimAngle += (restAngle(this.state, e, target) - b.aimAngle) * Math.min(1, dt * 4);
+      b.aimAngle += (restAngle(this.state, e, look) - b.aimAngle) * Math.min(1, dt * 4);
       if (e.cooldown <= 0) {
-        const chest = target.body.chest();
+        const target = pool.length === 1 ? pool[0]! : pool[this.rng.int(0, pool.length - 1)]!;
+        e.target = target;
+        const chest = target.fighter.body.chest();
         const ideal = this.aimFrom(e, chest.x, chest.y, spec.speed) ?? Math.PI + 0.6;
         e.aimTarget = ideal + this.rng.gauss(0, spec.aimError);
         e.drawing = true;
         b.draw = 0;
-        this.emit({ type: 'draw', side: 'enemy' });
+        this.emit({ type: 'draw', side: 'enemy', who: null });
       }
       return;
     }
@@ -692,32 +951,32 @@ export class BattleModel {
         f.poisonTick += dt;
         const c = f.body.chest();
         if (f.poisonTick >= 1 || killed || f.poison <= 0) {
-          this.emit({ type: 'dot', side: f.side, x: c.x, y: c.y, damage: f.poisonAcc });
+          this.emit({ type: 'dot', side: f.side, x: c.x, y: c.y, damage: f.poisonAcc, who: f.human?.who ?? null });
           f.poisonAcc = 0;
           f.poisonTick = 0;
         }
         if (killed) this.die(f, false);
       }
     }
-    if (f.side === 'enemy' && f.alive && f.lifted && f.body.bottom() < -40) {
+    if (f.alive && f.lifted && f.body.bottom() < -40) {
       f.hp = 0;
       this.die(f, true);
-      f.removed = true;
+      if (!f.human) f.removed = true;
     }
   }
 
   /** Applies damage; returns true when it killed (the caller emits its event, then calls die()). */
   private hurt(f: Fighter, amount: number): boolean {
     if (!f.alive || amount <= 0) return false;
-    if (f === this.player && (f.knocked > 0 || this.state !== 'playing')) return false;
+    if (f.human && (f.knocked > 0 || this.state !== 'playing' || this.intermission > 0)) return false;
     f.hp = Math.max(0, f.hp - amount);
     f.flash = 1;
     return f.hp <= 0;
   }
 
   private die(f: Fighter, balloon: boolean): void {
-    if (f === this.player) {
-      this.playerDies();
+    if (f.human) {
+      this.humanDies(f.human);
       return;
     }
     if (!f.alive) return;
@@ -738,29 +997,61 @@ export class BattleModel {
     if (this.state === 'playing') this.nextEnemyIn = NEXT_ENEMY_DELAY;
   }
 
-  private playerDies(): void {
-    const p = this.player;
+  private humanDies(h: Human): void {
+    const p = h.fighter;
     if (!p.alive) return;
-    this.cancelDraw();
+    this.cancelDraw(h.who);
     p.hp = 0;
     p.poison = 0;
     p.stun = 0;
-    if (this.livesLeft > 1) {
-      this.livesLeft--;
+    if (this.mode === 'versus') {
+      this.endRound(h);
+      return;
+    }
+    const e = this.enemy;
+    if (h.livesLeft > 1) {
+      h.livesLeft--;
       p.knocked = RESPAWN_DELAY;
-      this.emit({ type: 'lifeLost', livesLeft: this.livesLeft });
-      if (this.enemy?.alive) {
-        this.enemy.drawing = false;
-        this.enemy.cooldown = RESPAWN_DELAY + 1;
+      this.emit({ type: 'lifeLost', livesLeft: h.livesLeft, who: h.who });
+      if (e?.alive && this.mode === 'solo') {
+        e.drawing = false;
+        e.cooldown = RESPAWN_DELAY + 1;
+      } else if (e?.alive && e.target === h) {
+        e.drawing = false;
+        e.cooldown = Math.max(e.cooldown, 1);
       }
       return;
     }
-    this.livesLeft = 0;
+    h.livesLeft = 0;
     p.alive = false;
     p.nocked = null;
     p.body.kill();
+    if (this.humans.some((o) => o.fighter.alive)) {
+      this.emit({ type: 'out', who: h.who });
+      return;
+    }
     this.state = 'over';
     this.emit({ type: 'gameover', score: this.score, skulls: this.skullsEarned });
+  }
+
+  /** Versus: `loser` died; the other archer takes the round (and maybe the match). */
+  private endRound(loser: Human): void {
+    const p = loser.fighter;
+    p.alive = false;
+    p.nocked = null;
+    p.body.kill();
+    const winner: Who = loser.who === 0 ? 1 : 0;
+    this.cancelDraw(winner);
+    this.roundScore[winner]++;
+    const score: [number, number] = [this.roundScore[0], this.roundScore[1]];
+    this.emit({ type: 'roundOver', round: this.round, winner, score });
+    if (this.roundScore[winner] >= ROUNDS_TO_WIN) {
+      this.state = 'over';
+      this.winner = winner;
+      this.emit({ type: 'matchOver', winner, score });
+    } else {
+      this.intermission = ROUND_PAUSE;
+    }
   }
 
   private spawnEnemy(index: number, x: number, top: number, glide: boolean): Fighter {
@@ -809,12 +1100,30 @@ export class BattleModel {
 
   // ---------------------------------------------------------------- arrows
 
-  private fire(f: Fighter, type: ArrowId, angle: number, speed: number, power: number, base: number): void {
+  private fire(f: Fighter, type: ArrowId, angle: number, speed: number, power: number, base: number, who: Who | null = null): void {
     const m = this.muzzle(f, angle);
-    const a = new Arrow(this.id(), type, f.side, m.x, m.y, Math.cos(angle) * speed, Math.sin(angle) * speed, power, base);
+    const a = new Arrow(this.id(), type, f.side, m.x, m.y, Math.cos(angle) * speed, Math.sin(angle) * speed, power, base, who);
     this.arrows.push(a);
     if (this.arrows.length > MAX_ARROWS) this.arrows.shift();
-    this.emit({ type: 'shoot', side: f.side, arrow: type, power, x: m.x, y: m.y });
+    this.emit({ type: 'shoot', side: f.side, arrow: type, power, x: m.x, y: m.y, who });
+  }
+
+  /** What a missile homes in on: the opposing archer in versus, else the AI enemy / the nearest living human. */
+  private homingTarget(a: Arrow): Fighter | null {
+    if (this.mode === 'versus') return this.humans[a.owner === 'player' ? 1 : 0]!.fighter;
+    if (a.owner === 'player') return this.enemy;
+    let best: Fighter | null = null;
+    let bestD = Infinity;
+    for (const h of this.humans) {
+      if (!h.fighter.alive) continue;
+      const c = h.fighter.body.chest();
+      const d = Math.hypot(c.x - a.x, c.y - a.y);
+      if (d < bestD) {
+        bestD = d;
+        best = h.fighter;
+      }
+    }
+    return best;
   }
 
   private stepArrows(dt: number): void {
@@ -827,7 +1136,7 @@ export class BattleModel {
         for (const k of [-1, 1]) {
           const c = Math.cos(SPLIT_SPREAD * k);
           const s = Math.sin(SPLIT_SPREAD * k);
-          const b = new Arrow(this.id(), a.type, a.owner, a.x, a.y, a.vx * c - a.vy * s, a.vx * s + a.vy * c, a.power, a.base);
+          const b = new Arrow(this.id(), a.type, a.owner, a.x, a.y, a.vx * c - a.vy * s, a.vx * s + a.vy * c, a.power, a.base, a.who);
           b.splitDone = true;
           b.age = a.age;
           born.push(b);
@@ -836,7 +1145,7 @@ export class BattleModel {
       }
       let g = ARROW_GRAVITY * (a.type === 'axe' ? 1.3 : 1);
       if (a.type === 'missile' && a.age >= MISSILE_AFTER) {
-        const t = a.owner === 'player' ? this.enemy : this.player;
+        const t = this.homingTarget(a);
         if (t && t.alive && !t.removed) {
           const h = t.body.pos[J.head]!;
           const speed = clamp(Math.hypot(a.vx, a.vy), 800, 1150);
@@ -872,9 +1181,9 @@ export class BattleModel {
 
   /** Tests one sub-step; returns true when the arrow stopped (its tip is left at the impact point). */
   private collideArrow(a: Arrow, x0: number, y0: number, x1: number, y1: number): boolean {
-    if (a.owner === 'player') {
+    if (a.who !== null) {
       for (const ap of this.apples) {
-        if (segCircle(x0, y0, x1 - x0, y1 - y0, ap.x, ap.y, ap.r + 4) !== null) this.burstApple(ap);
+        if (segCircle(x0, y0, x1 - x0, y1 - y0, ap.x, ap.y, ap.r + 4) !== null) this.burstApple(ap, a.who);
       }
     }
     let bestT = Infinity;
@@ -931,7 +1240,7 @@ export class BattleModel {
     } else {
       f.body.pushBone(hit.bone, f.body.boneParam(hit.bone, hit.x, hit.y), dx * k, dy * k);
     }
-    if (!corpse && a.owner === 'player') this.hits++;
+    if (!corpse && a.who !== null) this.humans[a.who]!.hits++;
     if (!corpse) this.applyEffect(a, f, hit, dealt);
     this.emit({
       type: 'hit',
@@ -946,9 +1255,11 @@ export class BattleModel {
       corpse,
       blast: false,
       armor: f.armor,
+      who: f.human?.who ?? null,
+      by: a.who,
     });
     if (killed) {
-      if (f !== this.player) f.body.push(hit.head ? J.head : J.neck, dx * k, dy * k);
+      if (!f.human || this.mode === 'versus') f.body.push(hit.head ? J.head : J.neck, dx * k, dy * k);
       this.die(f, false);
     }
     if (a.type === 'chainsaw') {
@@ -962,7 +1273,7 @@ export class BattleModel {
   }
 
   private bodyDamage(a: Arrow, victim: Fighter, head: boolean): number {
-    const mul = head ? (a.owner === 'player' ? HEADSHOT_MUL : ENEMY_HEADSHOT_MUL) : 1;
+    const mul = head ? headshotMul(a) : 1;
     return damageTaken(a.base * mul, victim.armor);
   }
 
@@ -970,7 +1281,7 @@ export class BattleModel {
     switch (a.type) {
       case 'electric':
         f.stun = STUN_TIME;
-        if (f === this.player) this.cancelDraw();
+        if (f.human) this.cancelDraw(f.human.who);
         else {
           f.drawing = false;
           f.body.draw = 0;
@@ -988,21 +1299,21 @@ export class BattleModel {
         if (f.lifted) f.drawing = false;
         break;
       case 'vampire':
-        if (a.owner === 'player' && dealt > 0) this.healPlayer(dealt * VAMPIRE_SHARE);
+        if (a.who !== null && dealt > 0) this.healHuman(this.humans[a.who]!, dealt * VAMPIRE_SHARE);
         break;
       default:
         break;
     }
   }
 
-  private healPlayer(amount: number): void {
-    const p = this.player;
+  private healHuman(h: Human, amount: number): void {
+    const p = h.fighter;
     if (!p.alive || p.knocked > 0) return;
     const before = p.hp;
     p.hp = Math.min(p.maxHp, p.hp + amount);
     if (p.hp > before) {
       const c = p.body.chest();
-      this.emit({ type: 'heal', amount: p.hp - before, x: c.x, y: c.y });
+      this.emit({ type: 'heal', amount: p.hp - before, x: c.x, y: c.y, who: h.who });
     }
   }
 
@@ -1017,10 +1328,10 @@ export class BattleModel {
       f.body.blast(x, y, radius * 1.6, 950);
       if (f.side === a.owner || !f.alive || d >= radius) continue;
       const fall = 1 - d / radius;
-      const raw = a.base * fall * (f === direct && head ? (a.owner === 'player' ? HEADSHOT_MUL : ENEMY_HEADSHOT_MUL) : 1);
+      const raw = a.base * fall * (f === direct && head ? headshotMul(a) : 1);
       const before = f.hp;
       const killed = this.hurt(f, damageTaken(raw, f.armor));
-      if (a.owner === 'player' && f === direct) this.hits++;
+      if (a.who !== null && f === direct) this.humans[a.who]!.hits++;
       const c = f.body.chest();
       this.emit({
         type: 'hit',
@@ -1035,11 +1346,14 @@ export class BattleModel {
         corpse: false,
         blast: true,
         armor: f.armor,
+        who: f.human?.who ?? null,
+        by: a.who,
       });
       if (killed) this.die(f, false);
     }
-    if (a.owner === 'player') {
-      for (const ap of this.apples) if (Math.hypot(ap.x - x, ap.y - y) < radius + ap.r) this.burstApple(ap);
+    if (a.who !== null) {
+      const who = a.who;
+      for (const ap of this.apples) if (Math.hypot(ap.x - x, ap.y - y) < radius + ap.r) this.burstApple(ap, who);
     }
   }
 
@@ -1105,8 +1419,10 @@ export class BattleModel {
     const weights = {} as Record<AppleKind, number>;
     for (const a of APPLES) weights[a.kind] = a.weight;
     const kind = this.rng.weighted(weights);
-    const lo = TOWER_X + 260;
-    const hi = Math.max(lo + 60, (this.enemy?.platform.glideTo || this.enemy?.platform.x || 1150) - 220);
+    const front = this.humans[this.mode === 'coop' ? 1 : 0]!.tower.x;
+    const lo = front + 260;
+    const far = this.mode === 'versus' ? this.humans[1]!.tower.x : this.enemy?.platform.glideTo || this.enemy?.platform.x || 1150;
+    const hi = Math.max(lo + 60, far - 220);
     const x = this.rng.float(lo, hi);
     const y = WORLD_H + 50;
     const apex = this.rng.float(140, 360);
@@ -1124,23 +1440,25 @@ export class BattleModel {
     if (this.apples.some((ap) => ap.y > WORLD_H + 120 && ap.vy > 0)) this.apples = this.apples.filter((ap) => !(ap.y > WORLD_H + 120 && ap.vy > 0));
   }
 
-  private burstApple(ap: Apple): void {
+  /** An apple shot by human `who`: its hp / stamina go to that archer. */
+  private burstApple(ap: Apple, who: Who): void {
     if (!this.apples.includes(ap)) return;
     this.apples = this.apples.filter((a) => a !== ap);
     const def = appleDef(ap.kind);
-    const p = this.player;
+    const h = this.humans[who]!;
+    const p = h.fighter;
     let hp = 0;
     let st = 0;
     if (p.alive && p.knocked <= 0) {
       hp = Math.min(def.hp, p.maxHp - p.hp);
-      st = Math.min(def.stamina, this.stats.maxStamina - this.stamina);
+      st = Math.min(def.stamina, h.stats.maxStamina - h.stamina);
       p.hp += hp;
-      this.stamina += st;
+      h.stamina += st;
     }
-    this.emit({ type: 'apple', kind: ap.kind, x: ap.x, y: ap.y, hp, stamina: st });
+    this.emit({ type: 'apple', kind: ap.kind, x: ap.x, y: ap.y, hp, stamina: st, who });
     if (hp > 0) {
       const c = p.body.chest();
-      this.emit({ type: 'heal', amount: hp, x: c.x, y: c.y });
+      this.emit({ type: 'heal', amount: hp, x: c.x, y: c.y, who });
     }
   }
 
@@ -1175,7 +1493,7 @@ export class BattleModel {
 
   private cleanup(): void {
     for (const f of this.fighters) {
-      if (f === this.player || f.removed || f.alive) continue;
+      if (f.human || f.removed || f.alive) continue;
       if (f.body.top() > WORLD_H + 300 || f.body.bottom() < -300) f.removed = true;
     }
     if (this.fighters.some((f) => f.removed)) {
@@ -1211,6 +1529,17 @@ function restAngle(state: BattleState, e: Fighter, target: Fighter): number {
   const c = target.body.chest();
   const n = e.body.pos[J.neck]!;
   return clamp(normalizeAngle(Math.atan2(c.y - n.y, c.x - n.x) - Math.PI) * 0.5, -0.5, 0.5) + Math.PI;
+}
+
+/** Human arrows use the player headshot multiplier, AI arrows the enemy one. */
+function headshotMul(a: Arrow): number {
+  return a.who !== null ? HEADSHOT_MUL : ENEMY_HEADSHOT_MUL;
+}
+
+/** Clamps a human's aim to AIM_MIN..AIM_MAX, mirrored around vertical for an archer facing left (angles near PI). */
+export function clampAim(angle: number, facing: 1 | -1): number {
+  if (facing === 1) return clamp(normalizeAngle(angle), AIM_MIN, AIM_MAX);
+  return Math.PI - clamp(normalizeAngle(Math.PI - angle), AIM_MIN, AIM_MAX);
 }
 
 export function normalizeAngle(a: number): number {

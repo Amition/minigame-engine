@@ -79,6 +79,11 @@ export interface TestGame {
   press(target: TapTarget, seconds: number): Promise<void>;
   /** Drags from one target/point to another over `steps` frames. */
   drag(from: TapTarget, to: TapTarget, steps?: number): Promise<void>;
+  /**
+   * Several fingers at once (multi-touch): stroke i is pointer id i + 1. All press in the same frame, move together
+   * over `steps` frames (default 12) and lift in the same frame: `multiDrag([[a, a2], [b, b2]])`.
+   */
+  multiDrag(strokes: readonly (readonly [TapTarget, TapTarget])[], steps?: number): Promise<void>;
   /** Text outline of the stage (or a subtree). */
   dump(opts?: DumpOptions & { root?: Node }): string;
   /** Renders a frame (in every render mode) and writes a PNG. Returns the absolute path. */
@@ -235,6 +240,18 @@ export async function createTestGame(opts: TestGameOptions = {}): Promise<TestGa
         await run(1, dt60, false);
       }
       platform.touch('end', [{ id: 1, x: b.x, y: b.y }]);
+      await step(1);
+    },
+    multiDrag: async (strokes, steps = 12) => {
+      const paths = strokes.map(([from, to], i) => ({ id: i + 1, a: toScreen(point(from)), b: toScreen(point(to)) }));
+      const at = (k: number) => paths.map((p) => ({ id: p.id, x: p.a.x + (p.b.x - p.a.x) * k, y: p.a.y + (p.b.y - p.a.y) * k }));
+      platform.touch('start', at(0));
+      await run(1, dt60, false);
+      for (let i = 1; i <= steps; i++) {
+        platform.touch('move', at(i / steps));
+        await run(1, dt60, false);
+      }
+      platform.touch('end', at(1));
       await step(1);
     },
     dump: (o = {}) => dumpTree(o.root ?? game.stage, o),

@@ -100,13 +100,14 @@ const CARD_BODY_H = 58;
 const HEADER_H = 40;
 /** Top-right band the play scene's score ('得分 x/best') occupies. */
 const SCORE_H = 76;
-/** Bottom cluster: gear button, then the leaderboard button with the podium above it. */
+/** Bottom cluster: gear button, then the leaderboard button with the podium above it; 双人 above the gear. */
 const BTN_H = 64;
 const BOARD_W = 136;
 const CLUSTER_GAP = 14;
 const PODIUM = 64;
 const CLUSTER_W = BTN_H + CLUSTER_GAP + BOARD_W;
 const CLUSTER_H = PODIUM + 8 + BTN_H;
+const DUO_W = BTN_H + (BOARD_W - PODIUM) / 2;
 
 export interface MenuGeometry {
   /** Dark translucent 操作区 panel (decor only). */
@@ -453,6 +454,9 @@ class ArcherMenu implements MenuHandle {
     const top = PODIUM + 8;
     return ui.view({ kind: 'MenuCluster', position: 'absolute', left: g.cluster.x, top: g.cluster.y, width: g.cluster.w, height: g.cluster.h }, [
       ui.image(ART_KEYS.podium, { position: 'absolute', left: BTN_H + CLUSTER_GAP + (BOARD_W - PODIUM) / 2, top: 0, width: PODIUM, height: PODIUM }),
+      flatButton({ id: 'menu-duo', position: 'absolute', left: 0, top: 0, width: DUO_W, height: BTN_H }, [ui.text('双人', { size: 28, color: COLORS.buttonText })], () =>
+        this.openDuo(),
+      ),
       flatButton({ id: 'menu-settings', position: 'absolute', left: 0, top, width: BTN_H, height: BTN_H }, [ui.icon(inkIcon(ART_KEYS.gear), { size: 40 })], () =>
         this.openSettings(),
       ),
@@ -707,6 +711,26 @@ class ArcherMenu implements MenuHandle {
             ),
           ];
     this.track(showModal({ id: 'leaderboard', title: '排行榜', ...PANEL }, kids));
+  }
+
+  /** 双人: pick local versus or co-op, then fade into the two-player battle. */
+  private openDuo(): void {
+    playSound('click');
+    const choice = (mode: 'versus' | 'coop', title: string, desc: string) =>
+      flatButton({ id: `duo-${mode}`, width: 500, height: 108, direction: 'column', gap: 4, radius: 16 }, [
+        ui.text(title, { size: 36, weight: 'bold', color: COLORS.buttonText }),
+        ui.text(desc, { size: 24, color: '#5f5f66' }),
+      ], () => modal.close(mode));
+    const modal = showModal({ id: 'duo-dialog', title: '双人', ...PANEL }, [
+      choice('versus', '双人对战', '左右两座塔对射，先赢 3 回合获胜'),
+      choice('coop', '双人合作', '并肩守塔，一起击退源源不断的敌人'),
+    ]);
+    this.track(modal);
+    void modal.closed.then((mode) => {
+      if (mode !== 'versus' && mode !== 'coop') return;
+      playSound('click');
+      void this.game.scenes.go('duo', { mode }, { transition: 'fade' });
+    });
   }
 
   // ------------------------------------------------ helpers

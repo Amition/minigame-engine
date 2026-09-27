@@ -124,7 +124,7 @@ export function drawFighter(ctx: Ctx2D, f: FighterView): void {
   if (f.stun > 0) paintStun(ctx, f);
   if (f.boss) paintCrown(ctx, f);
   ctx.restore();
-  if (f.side === 'enemy' && f.alive) drawHpBar(ctx, f);
+  if (f.hpBar && f.alive) drawHpBar(ctx, f);
 }
 
 function paintBody(ctx: Ctx2D, f: FighterView, front: string, back: string, tier: number, metal: string, shade: string): void {

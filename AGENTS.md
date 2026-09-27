@@ -96,7 +96,8 @@ sandbox/           engine showcase app = compatibility test pack; scenes/<module
                    audio/index.ts (sound definitions), app.json (store metadata, appids, ad unit ids)
 game/              合成大西瓜 (Suika-style merge game), the default app for CLIs (package.json "engine.app") and
                    the worked example in the `make-a-game` skill
-archer/            布偶弓箭手 (Ragdoll Archers clone), landscape 1334x750: Verlet ragdoll, archery duel, upgrades menu
+archer/            布偶弓箭手 (Ragdoll Archers clone), landscape 1334x750: Verlet ragdoll, archery duel, upgrades menu,
+                   armored enemies, local two-player versus / co-op (scenes/duo.ts, two onAim halves)
 tools/             node CLIs: shot, build, dev, audio, art
 tests/             cross-module tests
 ```

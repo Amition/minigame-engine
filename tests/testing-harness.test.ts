@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { Box, createSave, darkUITheme, lightUITheme, mountScreen, Node, setUITheme, ui, uiTheme, type Ctx2D } from '@engine';
+import { Box, createSave, darkUITheme, lightUITheme, mountScreen, Node, onAim, setUITheme, ui, uiTheme, type AimInfo, type Ctx2D } from '@engine';
 import { createTestGame, type TestGame, type TestRenderMode } from '@engine/testing';
 
 let t: TestGame | null = null;
@@ -69,6 +69,36 @@ describe('createTestGame render modes', () => {
     expect(go.worldBounds().y).toBeGreaterThan(t.game.view.height / 2);
     await t.tap('#go');
     expect(taps).toBe(1);
+  });
+
+  it('multiDrag moves several pointers in the same frames (two onAim zones at once)', async () => {
+    t = await createTestGame();
+    const left = t.game.sceneLayer.add(new Box(375, 1334, {}, { x: 0, y: 0 }));
+    const right = t.game.sceneLayer.add(new Box(375, 1334, {}, { x: 375, y: 0 }));
+    const log: string[] = [];
+    const last = new Map<Node, AimInfo>();
+    for (const [name, zone] of [['L', left], ['R', right]] as const) {
+      onAim(zone, {
+        start: (a) => void log.push(`${name}start${a.pointer.pointerId}@${t!.game.time.frame}`),
+        release: (a) => {
+          log.push(`${name}release${a.pointer.pointerId}@${t!.game.time.frame}`);
+          last.set(zone, a);
+        },
+      });
+    }
+    const frame0 = t.game.time.frame;
+    await t.multiDrag(
+      [
+        [{ x: 200, y: 600 }, { x: 100, y: 700 }],
+        [{ x: 500, y: 600 }, { x: 700, y: 500 }],
+      ],
+      6,
+    );
+    expect(t.game.time.frame).toBe(frame0 + 8);
+    expect(log).toEqual([`Lstart1@${frame0}`, `Rstart2@${frame0}`, `Lrelease1@${frame0 + 7}`, `Rrelease2@${frame0 + 7}`]);
+    expect([last.get(left)!.dx, last.get(left)!.dy]).toEqual([-100, 100]);
+    expect(last.get(right)!.dx).toBeCloseTo(200);
+    expect(last.get(right)!.dy).toBeCloseTo(-100);
   });
 
   it('clamps dt to maxDt like game.step()', async () => {
