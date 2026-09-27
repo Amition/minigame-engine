@@ -69,6 +69,7 @@ function fighterView(over: Partial<FighterView> & { facing: 1 | -1 }): FighterVi
     maxHp: 100,
     alive: true,
     boss: false,
+    armor: 0,
     stuck: [],
     poison: 0,
     stun: 0,

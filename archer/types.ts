@@ -100,6 +100,11 @@ export interface FighterView {
   readonly maxHp: number;
   readonly alive: boolean;
   readonly boss: boolean;
+  /**
+   * Armor points (0 = none; see damageTaken in config.ts). Drawn as gear: 1-2 a helmet, 3-5 helmet + chest plate,
+   * 6+ helmet with visor + chest plate + shoulder guards.
+   */
+  readonly armor: number;
   /** Arrows stuck in this body (world positions, updated every step). */
   readonly stuck: readonly StuckArrowView[];
   /** Seconds of poison left (green tint while > 0). */

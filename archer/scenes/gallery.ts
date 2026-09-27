@@ -165,6 +165,7 @@ function fighter(spec: FighterSpec): FighterView & { stuck: StuckArrowView[] } {
     maxHp: 100,
     alive,
     boss: spec.boss ?? false,
+    armor: 0,
     stuck: [],
     poison: spec.poison ?? 0,
     stun: spec.stun ?? 0,

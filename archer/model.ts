@@ -116,6 +116,17 @@ export interface EnemySpec {
   arrow: ArrowId;
   /** Launch speed of its arrows. */
   speed: number;
+  /** Armor points: the player's arrows deal damageTaken(raw, armor). */
+  armor: number;
+}
+
+/**
+ * Armor of the index-th enemy: every 3rd regular enemy from the 4th on wears gear that grows with the index; bosses
+ * wear it from the second boss on. Capped at 10 (half damage).
+ */
+function enemyArmor(index: number, boss: boolean): number {
+  if (boss) return index >= 9 ? Math.min(10, 2 + Math.floor(index / 5)) : 0;
+  return index >= 3 && index % 3 === 0 ? Math.min(10, 2 + Math.floor(index / 3)) : 0;
 }
 
 /** The index-th enemy of a run; every 5th is a boss. Pure (no randomness). */
@@ -126,6 +137,7 @@ export function enemyFor(index: number): EnemySpec {
   return {
     index,
     boss,
+    armor: enemyArmor(index, boss),
     hp: Math.round((E.hp[0] + E.hp[1] * index) * (boss ? BOSS.hp : 1)),
     damage: Math.round((E.damage[0] + E.damage[1] * index) * (boss ? BOSS.damage : 1) * 10) / 10,
     aimError: Math.max(E.aimError[2], E.aimError[0] + E.aimError[1] * index) * (boss ? BOSS.aim : 1),
@@ -162,8 +174,11 @@ export type BattleEvent =
   | { type: 'start' }
   | { type: 'draw'; side: Side }
   | { type: 'shoot'; side: Side; arrow: ArrowId; power: number; x: number; y: number }
-  /** An arrow (or blast) hit a body. side = the victim. corpse = it was already dead (no damage). */
-  | { type: 'hit'; side: Side; x: number; y: number; damage: number; head: boolean; arrow: ArrowId; kill: boolean; boss: boolean; corpse: boolean; blast: boolean }
+  /**
+   * An arrow (or blast) hit a body. side = the victim. corpse = it was already dead (no damage). armor = the victim's
+   * armor points (damage is already reduced by it).
+   */
+  | { type: 'hit'; side: Side; x: number; y: number; damage: number; head: boolean; arrow: ArrowId; kill: boolean; boss: boolean; corpse: boolean; blast: boolean; armor: number }
   /** Damage over time (poison), reported about once per second. */
   | { type: 'dot'; side: Side; x: number; y: number; damage: number }
   | { type: 'thunk'; x: number; y: number; arrow: ArrowId; platform: 'tower' | 'block' }
@@ -208,6 +223,8 @@ export class Fighter implements FighterView {
   readonly pins: BodyPin[] = [];
   hp: number;
   maxHp: number;
+  /** Armor points (player: from the upgrade; enemies: from their spec). */
+  armor = 0;
   alive = true;
   nocked: ArrowId | null;
   poison = 0;
@@ -386,6 +403,7 @@ export class BattleModel {
     this.tower = this.addPlatform('tower', TOWER_X, TOWER_TOP + TOWER_H / 2, TOWER_W, TOWER_H, 0);
     const body = new Ragdoll({ x: TOWER_X, y: TOWER_TOP, facing: 1, aimAngle: 0 });
     this.player = new Fighter(this.id(), 'player', body, this.stats.maxHp, false, null, this.tower, this.selected);
+    this.player.armor = this.stats.armor;
     this.fighters.push(this.player);
     this.spawnEnemy(0, MENU_ENEMY_X, MENU_ENEMY_TOP, false);
     this.appleTimer = this.rng.float(APPLE_EVERY[0], APPLE_EVERY[1]) * 0.6;
@@ -431,6 +449,7 @@ export class BattleModel {
     this.loadout = arrows.length > 0 ? [...arrows] : ['normal'];
     if (!this.loadout.includes(this.selected)) this.selected = this.loadout[0]!;
     this.player.maxHp = this.player.hp = stats.maxHp;
+    this.player.armor = stats.armor;
     this.stamina = stats.maxStamina;
     this.livesLeft = stats.lives;
     this.player.nocked = this.selected;
@@ -667,8 +686,7 @@ export class BattleModel {
     if (f.poison > 0) {
       f.poison = Math.max(0, f.poison - dt);
       if (f.alive && f.knocked <= 0) {
-        const raw = POISON_DPS * dt;
-        const dmg = f.side === 'player' ? damageTaken(raw, this.stats.armor) : raw;
+        const dmg = damageTaken(POISON_DPS * dt, f.armor);
         const killed = this.hurt(f, dmg);
         f.poisonAcc += dmg;
         f.poisonTick += dt;
@@ -757,6 +775,7 @@ export class BattleModel {
     const body = new Ragdoll({ x: block.standX, y: block.standY, facing: -1, scale: spec.scale, aimAngle: Math.PI, slope: 1 });
     body.liftAt = spec.boss ? 3 : 2;
     const e = new Fighter(this.id(), 'enemy', body, spec.hp, spec.boss, spec, block, spec.arrow);
+    e.armor = spec.armor;
     e.arrived = !glide;
     e.cooldown = 1 + spec.cooldown * 0.5;
     this.fighters.push(e);
@@ -902,7 +921,7 @@ export class BattleModel {
     let killed = false;
     if (!corpse) {
       const before = f.hp;
-      killed = this.hurt(f, this.bodyDamage(a, hit.head));
+      killed = this.hurt(f, this.bodyDamage(a, f, hit.head));
       dealt = before - f.hp;
     }
     const k = IMPULSE * (0.6 + 0.4 * a.power) * (a.type === 'axe' ? 3 : a.type === 'chainsaw' ? 0.5 : 1);
@@ -926,6 +945,7 @@ export class BattleModel {
       boss: f.boss,
       corpse,
       blast: false,
+      armor: f.armor,
     });
     if (killed) {
       if (f !== this.player) f.body.push(hit.head ? J.head : J.neck, dx * k, dy * k);
@@ -941,9 +961,9 @@ export class BattleModel {
     return true;
   }
 
-  private bodyDamage(a: Arrow, head: boolean): number {
-    if (a.owner === 'player') return a.base * (head ? HEADSHOT_MUL : 1);
-    return damageTaken(a.base * (head ? ENEMY_HEADSHOT_MUL : 1), this.stats.armor);
+  private bodyDamage(a: Arrow, victim: Fighter, head: boolean): number {
+    const mul = head ? (a.owner === 'player' ? HEADSHOT_MUL : ENEMY_HEADSHOT_MUL) : 1;
+    return damageTaken(a.base * mul, victim.armor);
   }
 
   private applyEffect(a: Arrow, f: Fighter, hit: BodyHit, dealt: number): void {
@@ -999,7 +1019,7 @@ export class BattleModel {
       const fall = 1 - d / radius;
       const raw = a.base * fall * (f === direct && head ? (a.owner === 'player' ? HEADSHOT_MUL : ENEMY_HEADSHOT_MUL) : 1);
       const before = f.hp;
-      const killed = this.hurt(f, a.owner === 'player' ? raw : damageTaken(raw, this.stats.armor));
+      const killed = this.hurt(f, damageTaken(raw, f.armor));
       if (a.owner === 'player' && f === direct) this.hits++;
       const c = f.body.chest();
       this.emit({
@@ -1014,6 +1034,7 @@ export class BattleModel {
         boss: f.boss,
         corpse: false,
         blast: true,
+        armor: f.armor,
       });
       if (killed) this.die(f, false);
     }

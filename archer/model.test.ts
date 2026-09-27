@@ -418,6 +418,30 @@ describe('battle model', () => {
     expect(enemyFor(4).reward).toBeGreaterThan(enemyFor(5).reward * 2);
   });
 
+  it('armored enemies and an armored player take reduced damage', () => {
+    for (const i of [0, 1, 2, 4]) expect(enemyFor(i).armor).toBe(0);
+    for (const i of [3, 6, 12, 27]) expect(enemyFor(i).armor).toBeGreaterThan(0);
+    expect(enemyFor(12).armor).toBeGreaterThan(enemyFor(3).armor);
+    expect(enemyFor(99).armor).toBeLessThanOrEqual(10);
+    expect(enemyFor(14).armor).toBeGreaterThan(0);
+
+    const bare = quiet(2);
+    const plated = quiet(2);
+    plated.enemy!.armor = 10;
+    const c = chestOf(bare);
+    const h1 = of([...shootAt(bare, c.x, c.y), ...run(bare, 1.2)], 'hit')[0]!;
+    const h2 = of([...shootAt(plated, c.x, c.y), ...run(plated, 1.2)], 'hit')[0]!;
+    expect(h1.armor).toBe(0);
+    expect(h2.armor).toBe(10);
+    expect(h2.damage).toBeCloseTo(h1.damage / 2, 5);
+
+    const stats = { ...playerStats(NO_UPGRADES), armor: 3 };
+    const m = new BattleModel({ seed: 4, stats });
+    expect(m.player.armor).toBe(3);
+    m.setLoadout({ ...stats, armor: 5 }, ['normal']);
+    expect(m.player.armor).toBe(5);
+  });
+
   it('difficulty ramps with the enemy index', () => {
     for (let i = 0; i < 20; i++) {
       const a = enemyFor(i);
