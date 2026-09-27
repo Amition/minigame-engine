@@ -30,6 +30,8 @@ export interface GameConfig {
 }
 
 export interface GameEvents {
+  /** Start of every frame, also while paused; payload: unscaled dt (UI animations, scene transitions). */
+  frame: number;
   /** After systems and the stage ticked; payload dt. */
   update: number;
   prerender: Ctx2D;
@@ -135,6 +137,7 @@ export class Game extends Emitter<GameEvents> {
   private lastTime = -1;
   private running = false;
   private hiddenPaused = false;
+  private inputLocks = 0;
   private readonly ctx: Ctx2D;
 
   constructor(
@@ -218,6 +221,7 @@ export class Game extends Emitter<GameEvents> {
     this.time.dt = dt;
     this.time.frame++;
     this.time.realElapsed += rawDt;
+    this.emit('frame', rawDt);
     if (this.paused) return;
     this.time.elapsed += dt;
     for (const { sys } of this.systems.slice()) sys.update(dt);
@@ -304,10 +308,33 @@ export class Game extends Emitter<GameEvents> {
     return hitNode(this.stage, x, y);
   }
 
+  /** True while any lockInput() is held: new touches are ignored and pending taps don't fire. */
+  get inputLocked(): boolean {
+    return this.inputLocks > 0;
+  }
+
+  /** Blocks input (e.g. during scene transitions). Returns the release function (safe to call twice). */
+  lockInput(): () => void {
+    this.inputLocks++;
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      this.inputLocks--;
+    };
+  }
+
+  /** Prevents the pending tap of a pointer that is still down (e.g. after a long press fired). */
+  cancelTap(pointerId: number): void {
+    const rec = this.pointers.get(pointerId);
+    if (rec) rec.moved = true;
+  }
+
   private handleTouch(e: RawTouchEvent): void {
     for (const t of e.touches) {
       const p = this.screenToStage(t.x, t.y);
       if (e.phase === 'start') {
+        if (this.inputLocks > 0) continue;
         const target = this.hitTest(p.x, p.y);
         const rec = { target, startX: p.x, startY: p.y, moved: false };
         this.pointers.set(t.id, rec);
@@ -324,7 +351,9 @@ export class Game extends Emitter<GameEvents> {
       } else if (e.phase === 'end') {
         this.pointers.delete(t.id);
         this.dispatch('pointerup', t.id, p, rec);
-        if (!rec.moved && rec.target && !rec.target.destroyed) this.dispatch('tap', t.id, p, rec);
+        if (!rec.moved && rec.target && !rec.target.destroyed && this.inputLocks === 0) {
+          this.dispatch('tap', t.id, p, rec);
+        }
       } else {
         this.pointers.delete(t.id);
         this.dispatch('pointercancel', t.id, p, rec);

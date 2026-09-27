@@ -11,6 +11,7 @@
  *   --params <json>    params passed to the scene
  *   --device <list>    comma list of device names or WxH@dpr (default: iphone-14); 'all' = every profile
  *   --tap <selector>   tap a node (repeatable, in order); --drag "<from>|<to>" also allowed
+ *   --wait <seconds>   advance time between actions (e.g. let a scene transition finish)
  *   --seconds <n>      simulated time to advance after setup/taps (default 0.3)
  *   --scale <n>        PNG scale relative to CSS px (default 1)
  *   --out <file>       output path (only with a single device)
@@ -28,7 +29,7 @@ interface Args {
   scene?: string;
   params?: unknown;
   devices: string[];
-  actions: { kind: 'tap' | 'drag'; value: string }[];
+  actions: { kind: 'tap' | 'drag' | 'wait'; value: string }[];
   seconds: number;
   scale: number;
   out?: string;
@@ -66,6 +67,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--drag':
         a.actions.push({ kind: 'drag', value: v() });
+        break;
+      case '--wait':
+        a.actions.push({ kind: 'wait', value: v() });
         break;
       case '--seconds':
         a.seconds = +v();
@@ -106,6 +110,7 @@ async function main() {
     });
     for (const act of args.actions) {
       if (act.kind === 'tap') await t.tap(act.value);
+      else if (act.kind === 'wait') await t.advance(+act.value);
       else {
         const [from, to] = act.value.split('|');
         if (!from || !to) throw new Error('--drag expects "<from>|<to>"');
