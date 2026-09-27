@@ -170,6 +170,20 @@ describe('lintUI rules (failing + passing fixture each)', () => {
     expect(issues.filter((i) => i.severity === 'error'), formatLint(issues)).toHaveLength(0);
   });
 
+  it('plain nodes tagged lint-blocker act as a modal backdrop', async () => {
+    t = await createTestGame({ device: 'iphone-14' });
+    const layer = t.game.sceneLayer;
+    const w = t.game.view.width;
+    const h = t.game.view.height;
+    layer.add(new Box(300, 100, { fill: '#2563eb' }, { id: 'under', x: 100, y: 300, interactive: true }));
+    const backdrop = layer.add(new Box(w, h, { fill: 'rgba(0,0,0,0.6)' }, { id: 'backdrop', interactive: true }));
+    layer.add(new Box(300, 100, { fill: '#2563eb' }, { id: 'ok', x: 100, y: 600, interactive: true }));
+    expect(lintUI(layer, t.game).map((i) => i.rule)).toContain('interactive-overlap');
+    backdrop.tags.add('lint-blocker');
+    const issues = lintUI(layer, t.game);
+    expect(issues.filter((i) => i.severity === 'error'), formatLint(issues)).toHaveLength(0);
+  });
+
   it('rules can be re-graded or turned off', async () => {
     const root = await screen(() => [ui.text('Tiny', { size: 14 })]);
     expect(lintUI(root, t!.game, { rules: { 'small-font': 'error' } })[0]?.severity).toBe('error');

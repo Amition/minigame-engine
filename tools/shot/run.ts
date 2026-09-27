@@ -16,12 +16,14 @@
  *   --scale <n>        PNG scale relative to CSS px (default 1)
  *   --out <file>       output path (only with a single device)
  *   --dump             print the stage tree
+ *   --lint             print the UI lint report; exit code 1 if any device has lint errors
+ *   --bounds           also write <file>-bounds.png with the drawUIBounds overlay (hit areas, text, issues)
  *   --seed <n>         rng seed (default 1)
  */
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { AppDef } from '@engine';
+import { drawUIBounds, formatLint, lintUI, type AppDef } from '@engine';
 import { createTestGame, devices } from '@engine/testing';
 
 interface Args {
@@ -34,11 +36,23 @@ interface Args {
   scale: number;
   out?: string;
   dump: boolean;
+  lint: boolean;
+  bounds: boolean;
   seed: number;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { app: 'sandbox', devices: ['iphone-14'], actions: [], seconds: 0.3, scale: 1, dump: false, seed: 1 };
+  const a: Args = {
+    app: 'sandbox',
+    devices: ['iphone-14'],
+    actions: [],
+    seconds: 0.3,
+    scale: 1,
+    dump: false,
+    lint: false,
+    bounds: false,
+    seed: 1,
+  };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]!;
     const v = () => {
@@ -83,6 +97,12 @@ function parseArgs(argv: string[]): Args {
       case '--dump':
         a.dump = true;
         break;
+      case '--lint':
+        a.lint = true;
+        break;
+      case '--bounds':
+        a.bounds = true;
+        break;
       case '--seed':
         a.seed = +v();
         break;
@@ -99,6 +119,7 @@ async function main() {
   const mainFile = resolve(appDir, 'main.ts');
   if (!existsSync(mainFile)) throw new Error(`no main.ts in ${appDir}`);
   const app = (await import(pathToFileURL(mainFile).href)).default as AppDef;
+  let lintErrors = 0;
   for (const device of args.devices) {
     const t = await createTestGame({
       app,
@@ -125,9 +146,20 @@ async function main() {
         : `.shots/${args.app.replace(/[\\/]/g, '_')}-${sceneName}-${device}.png`;
     const path = await t.screenshot(file, { scale: args.scale });
     console.log(`shot: ${path}  (scene=${sceneName}, device=${device}, view=${Math.round(t.game.view.width)}x${Math.round(t.game.view.height)})`);
+    if (args.bounds) {
+      const boundsFile = file.replace(/(\.png)?$/i, '-bounds.png');
+      const g = t.game;
+      console.log(`bounds: ${await t.screenshot(boundsFile, { scale: args.scale, overlay: (ctx) => drawUIBounds(ctx, g.stage, { game: g }) })}`);
+    }
     if (args.dump) console.log(t.dump());
+    if (args.lint) {
+      const issues = lintUI(t.game.stage, t.game);
+      lintErrors += issues.filter((i) => i.severity === 'error').length;
+      console.log(`[${device}] ${formatLint(issues)}`);
+    }
     t.destroy();
   }
+  if (lintErrors > 0) process.exitCode = 1;
 }
 
 main().catch((e) => {

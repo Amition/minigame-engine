@@ -151,14 +151,14 @@ class InputDemo extends DemoScene {
     });
 
     let longCount = 0;
-    const lp = button(this, 'long-press', '长按我 0', pad * 2 + half, rowY, half, 110, '#0ea5e9', () => {});
+    const lp = button(this, 'long-press', '长按我 0', pad * 2 + half, rowY, half, 110, '#0284c7', () => {});
     onLongPress(lp, () => {
       longCount++;
       lp.find<Text>('Text')!.text = `长按我 ${longCount}`;
       shake(lp, 8, 0.25);
     }, 0.5);
     let dblCount = 0;
-    const dt = button(this, 'double-tap', '双击我 0', pad * 2 + half, rowY + 130, half, 110, '#f97316', () => {});
+    const dt = button(this, 'double-tap', '双击我 0', pad * 2 + half, rowY + 130, half, 110, '#ea580c', () => {});
     onDoubleTap(dt, () => {
       dblCount++;
       dt.find<Text>('Text')!.text = `双击我 ${dblCount}`;
@@ -220,8 +220,8 @@ class ScenesDemo extends DemoScene {
       result.text = `对话框结果: ${r ?? '(closed)'}`;
       popIn(result, 0.3);
     };
-    button(this, 'push-slide', 'push · slide-up', 24, py + 40, bw, 84, '#10b981', () => void open('slide-up'));
-    button(this, 'push-zoom', 'push · zoom', 24 + bw + gap, py + 40, bw, 84, '#10b981', () => void open('zoom'));
+    button(this, 'push-slide', 'push · slide-up', 24, py + 40, bw, 84, '#059669', () => void open('slide-up'));
+    button(this, 'push-zoom', 'push · zoom', 24 + bw + gap, py + 40, bw, 84, '#059669', () => void open('zoom'));
   }
 }
 
@@ -231,7 +231,7 @@ class DialogScene extends Scene {
     const n = (params as { n?: number } | undefined)?.n ?? 0;
     const w = this.width;
     const h = this.height;
-    this.add(new Box(w, h, { fill: 'rgba(0,0,0,0.6)' }, { id: 'backdrop', interactive: true }));
+    this.add(new Box(w, h, { fill: 'rgba(0,0,0,0.6)' }, { id: 'backdrop', tags: ['lint-blocker'], interactive: true }));
     const pw = Math.min(560, w - 80);
     const panel = this.add(new Box(pw, 360, { fill: '#262b38', radius: 28, shadow: { color: '#000a', blur: 30, y: 10 } }, { id: 'dialog', x: w / 2, y: h / 2, anchor: 0.5 }));
     panel.add(new Text('确认操作？', { fontSize: 40, fontWeight: 'bold', color: '#ffffff' }, { x: pw / 2, y: 80, anchor: 0.5 }));
@@ -242,7 +242,7 @@ class DialogScene extends Scene {
     };
     const bw = (pw - 72) / 2;
     button(panel, 'dialog-cancel', '取消', 24, 236, bw, 88, '#4b5563', () => done('cancel'));
-    button(panel, 'dialog-ok', '确定', 48 + bw, 236, bw, 88, '#10b981', () => done('ok'));
+    button(panel, 'dialog-ok', '确定', 48 + bw, 236, bw, 88, '#059669', () => done('ok'));
   }
 }
 

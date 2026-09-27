@@ -37,7 +37,7 @@ class BasicsScene extends DemoScene {
     spinner.onUpdate((dt) => (spinner.rotation += dt * 1.5));
     let count = 0;
     const btn = this.add(
-      new Box(360, 100, { fill: '#10b981', radius: 50, shadow: { color: '#0008', blur: 16, y: 6 } }, {
+      new Box(360, 100, { fill: '#059669', radius: 50, shadow: { color: '#0008', blur: 16, y: 6 } }, {
         id: 'counter',
         x: w / 2,
         y: y + 780,

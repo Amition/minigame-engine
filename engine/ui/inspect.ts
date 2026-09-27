@@ -218,10 +218,22 @@ interface Item {
   decor: boolean;
 }
 
+const LINT_ROLE_TAGS: Record<string, Role> = {
+  'lint-blocker': 'blocker',
+  'lint-surface': 'surface',
+  'lint-decor': 'decor',
+  'lint-control': 'control',
+};
+
+/** Plain nodes (Box, Sprite, ...) opt into a lint role with a tag, e.g. `tags: ['lint-blocker']` on a backdrop. */
 function roleOf(n: Node): Role {
   const r: UILintRole = n instanceof UIView ? n.lintRole : 'auto';
-  if (r === 'auto') return n.interactive ? 'control' : 'none';
-  return r;
+  if (r !== 'auto') return r;
+  for (const t of n.tags) {
+    const tagged = LINT_ROLE_TAGS[t];
+    if (tagged) return tagged;
+  }
+  return n.interactive ? 'control' : 'none';
 }
 
 function textInfo(n: Node): TextInfo | null {
