@@ -70,7 +70,6 @@ export {
 } from './patterns';
 export {
   texturePixels,
-  tintTexture,
   silhouetteTexture,
   outlineTexture,
   dropShadowTexture,

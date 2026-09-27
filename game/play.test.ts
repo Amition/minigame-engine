@@ -13,7 +13,7 @@ afterEach(() => {
 const shots = !!process.env.GAME_SHOTS;
 
 async function play(device: string, seed: number): Promise<{ t: TestGame; scene: PlayScene }> {
-  t = await createTestGame({ app, device, scene: 'play', params: { seed } });
+  t = await createTestGame({ app, device, scene: 'play', params: { seed }, render: 'none' });
   return { t, scene: t.scene as PlayScene };
 }
 
@@ -37,7 +37,7 @@ describe('play scene', () => {
     expect(scene.model.score).toBeGreaterThan(0);
     const fruits = t.game.stage.findAll('Fruit');
     expect(fruits.length).toBeGreaterThan(scene.model.physics.bodies.length - 1);
-  }, 60_000);
+  });
 
   it('HUD lints clean on three devices', async () => {
     for (const device of ['iphone-se', 'iphone-14', 'ipad']) {
@@ -49,7 +49,7 @@ describe('play scene', () => {
       t.destroy();
     }
     t = null;
-  }, 30_000);
+  });
 
   it('pause menu opens and resumes', async () => {
     const { t, scene } = await play('iphone-14', 1);
@@ -65,7 +65,7 @@ describe('play scene', () => {
     await t.advance(0.6);
     expect(openModalsOf().length).toBe(0);
     expect(scene.model.physics.time).toBeGreaterThan(score);
-  }, 15_000);
+  });
 
   it('shows the game over dialog when the jar overflows', async () => {
     const { t, scene } = await play('iphone-14', 1);
@@ -81,5 +81,5 @@ describe('play scene', () => {
     await t.advance(1);
     expect((t.scene as PlayScene).model.state).toBe('playing');
     expect(t.scene).not.toBe(scene);
-  }, 15_000);
+  });
 });

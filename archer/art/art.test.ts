@@ -327,7 +327,7 @@ describe('world painters', () => {
       for (let frame = 0; frame < 20; frame++) paintEverything(ctx, frame / 60);
       expect(textureStats({ top: 0 }).count).toBe(before);
     });
-  }, 30_000);
+  });
 
   it('mirror the fighter: the bow is on the facing side', () => {
     for (const facing of [1, -1] as const) {

@@ -1,4 +1,4 @@
-import { Node, playSound, popIn, shake, spawnParticles, Sprite, Text, tween, type Vec2 } from '@engine';
+import { convertPoint, Node, playSound, popIn, shake, spawnParticles, Sprite, Text, tween, type Vec2 } from '@engine';
 import { ART_KEYS } from '../art/index';
 import { COLORS, type AppleKind } from '../config';
 import type { BattleEvent } from '../model';
@@ -110,8 +110,7 @@ export class BattleFx {
 
   /** Floating text next to a HUD node (scene units). */
   popupScreen(text: string, near: Node, color: string): void {
-    const c = near.worldCenter();
-    const p = this.screen.toLocal(c.x, c.y);
+    const p = this.centreOf(near);
     const t = this.screen.add(new Text(text, { fontSize: 28, fontWeight: 'bold', color, stroke: { color: '#111114', width: 6 } }, { x: p.x, y: p.y - 44, anchor: 0.5 }));
     popIn(t, 0.15);
     tween(t, { y: p.y - 90, alpha: 0 }, 0.7, { delay: 0.3, owner: this.scene, onComplete: () => t.destroy() });
@@ -134,10 +133,8 @@ export class BattleFx {
 
   /** '+N' skulls flying from a kill (world point) to `target` (a HUD node); `onLand` runs when they arrive. */
   flySkulls(reward: number, wx: number, wy: number, target: Node | undefined, onLand: () => void): void {
-    const from = this.field.toWorld(wx, wy);
-    const to: Vec2 = target?.worldCenter() ?? { x: 60, y: 40 };
-    const a = this.screen.toLocal(from.x, from.y);
-    const b = this.screen.toLocal(to.x, to.y);
+    const a = convertPoint(this.field, this.screen, wx, wy);
+    const b = target ? this.centreOf(target) : convertPoint(null, this.screen, 60, 40);
     const g = this.screen.add(new Node({ x: a.x, y: a.y - 40 }));
     g.add(new Sprite(ART_KEYS.skull, { anchor: 0.5, width: 44, height: 44 }));
     g.add(new Text(`+${reward}`, { fontSize: 34, fontWeight: 'bold', color: '#ffffff', stroke: { color: '#3b3b3d', width: 6 } }, { x: 28, y: 0, anchorY: 0.5 }));
@@ -151,5 +148,10 @@ export class BattleFx {
         onLand();
       },
     });
+  }
+
+  /** Centre of a HUD node in `screen` units. */
+  private centreOf(n: Node): Vec2 {
+    return convertPoint(n, this.screen, n.width / 2, n.height / 2);
   }
 }

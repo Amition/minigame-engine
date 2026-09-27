@@ -1,3 +1,4 @@
+import { closestSegmentSegment, sweepSegmentCircle, type GeomClosestPair } from '@engine';
 import { BODY, BONES, J, JOINT_COUNT, type PlatformView, type Vec } from './types';
 
 /**
@@ -291,7 +292,11 @@ export class Ragdoll {
     return false;
   }
 
-  /** Swept test of the segment (x0, y0) -> (x1, y1) against the head circle and every bone capsule. */
+  /**
+   * Swept test of the segment (x0, y0) -> (x1, y1) against the head circle and every bone capsule. The capsule entry
+   * backs off from the closest point along the segment (exact for perpendicular hits); kept instead of the exact
+   * sweepSegmentCapsule so seeded battles replay unchanged.
+   */
   sweep(x0: number, y0: number, x1: number, y1: number): BodyHit | null {
     const s = this.scale;
     const dx = x1 - x0;
@@ -299,14 +304,14 @@ export class Ragdoll {
     const len = Math.hypot(dx, dy);
     let best: BodyHit | null = null;
     const head = this.pos[J.head]!;
-    const hp = segCircle(x0, y0, dx, dy, head.x, head.y, BODY.headR * s);
+    const hp = sweepSegmentCircle(x0, y0, x1, y1, head.x, head.y, BODY.headR * s);
     if (hp !== null) best = { bone: NECK_BONE, head: true, param: hp, x: x0 + dx * hp, y: y0 + dy * hp };
     for (let i = 0; i < BONES.length; i++) {
       const [a, b] = BONES[i]!;
       const pa = this.pos[a]!;
       const pb = this.pos[b]!;
       const r = ((i === TORSO_BONE ? BODY.torsoW : BODY.limbW) / 2) * s;
-      segSeg(x0, y0, x1, y1, pa.x, pa.y, pb.x, pb.y, closest);
+      closestSegmentSegment(x0, y0, x1, y1, pa.x, pa.y, pb.x, pb.y, closest);
       if (closest.d2 > r * r) continue;
       const back = len > 1e-6 ? Math.sqrt(r * r - closest.d2) / len : 0;
       const param = Math.max(0, closest.s - back);
@@ -517,126 +522,4 @@ function ik(root: Vec, end: Vec, a: number, b: number, bx: number, by: number, o
   out.y = root.y + a * (pick ? y1 : y2);
 }
 
-const closest = { s: 0, t: 0, d2: 0 };
-
-/** Closest points of segments p1-q1 and p2-q2 (Ericson, RTCD 5.1.9). */
-export function segSeg(
-  p1x: number,
-  p1y: number,
-  q1x: number,
-  q1y: number,
-  p2x: number,
-  p2y: number,
-  q2x: number,
-  q2y: number,
-  out: { s: number; t: number; d2: number },
-): void {
-  const d1x = q1x - p1x;
-  const d1y = q1y - p1y;
-  const d2x = q2x - p2x;
-  const d2y = q2y - p2y;
-  const rx = p1x - p2x;
-  const ry = p1y - p2y;
-  const a = d1x * d1x + d1y * d1y;
-  const e = d2x * d2x + d2y * d2y;
-  const f = d2x * rx + d2y * ry;
-  let s = 0;
-  let t = 0;
-  const EPS = 1e-9;
-  if (a <= EPS && e <= EPS) {
-    s = t = 0;
-  } else if (a <= EPS) {
-    t = clamp01(f / e);
-  } else {
-    const c = d1x * rx + d1y * ry;
-    if (e <= EPS) {
-      s = clamp01(-c / a);
-    } else {
-      const b = d1x * d2x + d1y * d2y;
-      const denom = a * e - b * b;
-      s = denom > EPS ? clamp01((b * f - c * e) / denom) : 0;
-      t = (b * s + f) / e;
-      if (t < 0) {
-        t = 0;
-        s = clamp01(-c / a);
-      } else if (t > 1) {
-        t = 1;
-        s = clamp01((b - c) / a);
-      }
-    }
-  }
-  const cx = p1x + d1x * s - (p2x + d2x * t);
-  const cy = p1y + d1y * s - (p2y + d2y * t);
-  out.s = s;
-  out.t = t;
-  out.d2 = cx * cx + cy * cy;
-}
-
-/** First parameter in [0, 1] where p + d * t enters the circle, or null. Starting inside counts as 0. */
-export function segCircle(px: number, py: number, dx: number, dy: number, cx: number, cy: number, r: number): number | null {
-  const fx = px - cx;
-  const fy = py - cy;
-  const c = fx * fx + fy * fy - r * r;
-  if (c <= 0) return 0;
-  const a = dx * dx + dy * dy;
-  if (a < 1e-9) return null;
-  const b = 2 * (fx * dx + fy * dy);
-  const disc = b * b - 4 * a * c;
-  if (disc < 0) return null;
-  const t = (-b - Math.sqrt(disc)) / (2 * a);
-  return t >= 0 && t <= 1 ? t : null;
-}
-
-/** First parameter in [0, 1] where the segment enters the rotated rectangle, or null (Liang-Barsky). */
-export function segRect(x0: number, y0: number, x1: number, y1: number, pl: PlatformView): number | null {
-  const c = Math.cos(pl.angle);
-  const s = Math.sin(pl.angle);
-  const ax = x0 - pl.x;
-  const ay = y0 - pl.y;
-  const bx = x1 - pl.x;
-  const by = y1 - pl.y;
-  const lx0 = ax * c + ay * s;
-  const ly0 = -ax * s + ay * c;
-  const lx1 = bx * c + by * s;
-  const ly1 = -bx * s + by * c;
-  const dx = lx1 - lx0;
-  const dy = ly1 - ly0;
-  const hx = pl.w / 2;
-  const hy = pl.h / 2;
-  let t0 = 0;
-  let t1 = 1;
-  const clip = (p: number, q: number): boolean => {
-    if (Math.abs(p) < 1e-12) return q >= 0;
-    const r = q / p;
-    if (p < 0) {
-      if (r > t1) return false;
-      if (r > t0) t0 = r;
-    } else {
-      if (r < t0) return false;
-      if (r < t1) t1 = r;
-    }
-    return true;
-  };
-  if (!clip(-dx, lx0 + hx) || !clip(dx, hx - lx0) || !clip(-dy, ly0 + hy) || !clip(dy, hy - ly0)) return null;
-  return t0 <= t1 ? t0 : null;
-}
-
-/** World point -> platform-local coordinates. */
-export function toPlatform(pl: PlatformView, x: number, y: number): Vec {
-  const c = Math.cos(pl.angle);
-  const s = Math.sin(pl.angle);
-  const dx = x - pl.x;
-  const dy = y - pl.y;
-  return { x: dx * c + dy * s, y: -dx * s + dy * c };
-}
-
-/** Platform-local point -> world coordinates. */
-export function fromPlatform(pl: PlatformView, lx: number, ly: number): Vec {
-  const c = Math.cos(pl.angle);
-  const s = Math.sin(pl.angle);
-  return { x: pl.x + lx * c - ly * s, y: pl.y + lx * s + ly * c };
-}
-
-function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
+const closest: GeomClosestPair = { s: 0, t: 0, d2: 0 };

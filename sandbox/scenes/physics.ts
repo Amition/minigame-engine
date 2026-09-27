@@ -1,9 +1,12 @@
 import {
   Box,
+  createRigidChain,
+  createRigidRagdoll,
   Node,
   RigidDebugView,
   rigidBox,
   rigidCircle,
+  RigidMouseJoint,
   rigidPolygon,
   RigidWorld,
   Rng,
@@ -12,7 +15,9 @@ import {
   World,
   type Ctx2D,
   type NodeOptions,
+  type PointerEvt,
   type RigidBody,
+  type RigidRagdoll,
   type SceneFactory,
 } from '@engine';
 import { DemoScene } from '../common';
@@ -382,7 +387,239 @@ class RigidPlinkoScene extends RigidDemo {
   }
 }
 
+// ---------------------------------------------------------------- joints
+
+const RAGDOLL_LOOKS: Record<string, Look> = {
+  head: { color: '#fcd9b6', edge: '#b7794f' },
+  torso: { color: '#3b82f6', edge: '#1e40af' },
+  upperArmF: { color: '#60a5fa', edge: '#1e40af' },
+  foreArmF: { color: '#fcd9b6', edge: '#b7794f' },
+  upperArmB: { color: '#2563eb', edge: '#1e3a8a' },
+  foreArmB: { color: '#e0b894', edge: '#9a6440' },
+  thighF: { color: '#475569', edge: '#1e293b' },
+  shinF: { color: '#475569', edge: '#1e293b' },
+  thighB: { color: '#334155', edge: '#0f172a' },
+  shinB: { color: '#334155', edge: '#0f172a' },
+};
+const PLANK: Look = { color: '#b45309', edge: '#78350f' };
+const CRATE: Look = { color: '#f59e0b', edge: '#92400e' };
+const BALL: Look = { color: '#ef4444', edge: '#991b1b' };
+const ARM: Look = { color: '#14b8a6', edge: '#0f766e' };
+const BOB: Look = { color: '#a855f7', edge: '#6b21a8' };
+
+/**
+ * Joints: a ragdoll (createRigidRagdoll) tumbles down stairs and is knocked by balls aimed at it, crates drop on a
+ * sagging chain bridge (createRigidChain), a pendulum hangs on a distance joint and a windmill of two welded arms
+ * turns on a motorized revolute joint. Drag any body (mouse joint). 刚度 toggles the ragdoll between limp and
+ * active (angular springs hold the pose), 调试 shows joints, limits and contacts.
+ */
+class RigidJointsScene extends RigidDemo {
+  readonly title = 'Physics · Joints';
+  private readonly rand = new Rng(5);
+  private ragdoll: RigidRagdoll | null = null;
+  private stiff = false;
+  private time = 0;
+  private nextCrate = 0;
+  private crates = 0;
+  private nextBall = 0;
+  private nextRagdoll = 0;
+  private balls: { body: RigidBody; age: number }[] = [];
+  private drag: { joint: RigidMouseJoint; pointer: number } | null = null;
+  private stairTop = 0;
+  private stepW = 0;
+
+  protected build(): void {
+    const view = this.addView();
+    this.physics = new RigidWorld({ gravity: 1600, interpolate: true });
+    view.add(new Paint((ctx) => this.paintRods(ctx), { id: 'rods' }));
+    view.add(new Paint((ctx) => paintBodies(ctx, this.physics), { id: 'bodies' }));
+    view.add(new Paint((ctx) => this.paintPins(ctx), { id: 'pins' }));
+    this.debug = view.add(new RigidDebugView(this.physics, { fill: false, lineWidth: 2 }, { id: 'debug', visible: false }));
+    this.addHud();
+    this.addButton('btn-reset', '重置', 0, () => this.reset());
+    this.addButton('btn-debug', '调试', 136, () => (this.debug.visible = !this.debug.visible));
+    this.addButton('btn-stiff', '刚度', 272, () => {
+      this.stiff = !this.stiff;
+      this.ragdoll?.setStiffness(this.stiff ? 1 : 0);
+    });
+    view.interactive = true;
+    view.on('pointerdown', (e) => this.grab(e));
+    view.on('pointermove', (e) => {
+      if (!this.drag || e.pointerId !== this.drag.pointer) return;
+      const p = view.stageToWorld(e.x, e.y);
+      this.drag.joint.setTarget(p.x, p.y);
+    });
+    const release = (e: PointerEvt) => {
+      if (!this.drag || e.pointerId !== this.drag.pointer) return;
+      this.physics.removeJoint(this.drag.joint);
+      this.drag = null;
+    };
+    view.on('pointerup', release);
+    view.on('pointercancel', release);
+    this.reset();
+    this.onUpdate((dt) => this.think(dt));
+  }
+
+  private reset(): void {
+    const { w, h } = this.content;
+    const P = this.physics;
+    P.clear();
+    this.drag = null;
+    this.balls = [];
+    this.time = 0;
+    this.crates = 0;
+    this.nextCrate = 0.4;
+    this.nextBall = 1.6;
+    this.nextRagdoll = 9;
+    const floorY = h - 60;
+    P.add({ name: 'floor', type: 'static', shape: rigidBox(w + 400, 200), x: w / 2, y: floorY + 100 });
+    P.add({ name: 'wall-left', type: 'static', shape: rigidBox(200, h * 3), x: -100, y: h / 2 });
+    P.add({ name: 'wall-right', type: 'static', shape: rigidBox(200, h * 3), x: w + 100, y: h / 2 });
+
+    // Stairs down to the right (bottom-left).
+    const steps = 7;
+    const stepH = 54;
+    this.stepW = Math.min(96, w * 0.12);
+    this.stairTop = floorY - steps * stepH;
+    for (let i = 0; i < steps; i++) {
+      const top = floorY - (steps - i) * stepH;
+      const x0 = i === 0 ? -200 : i * this.stepW;
+      const x1 = (i + 1) * this.stepW;
+      P.add({ name: `step${i}`, type: 'static', shape: rigidBox(x1 - x0, floorY + 40 - top), x: (x0 + x1) / 2, y: (top + floorY + 40) / 2, friction: 0.7 });
+    }
+
+    // Chain bridge between two pillars (top).
+    const by = 290;
+    const inset = 64;
+    for (const x of [inset / 2, w - inset / 2]) {
+      P.add({ type: 'static', shape: rigidBox(inset, 150), x, y: by + 75 });
+    }
+    const links = 16;
+    const bridge = createRigidChain(P, {
+      from: { x: inset, y: by },
+      to: { x: w - inset, y: by },
+      links,
+      linkLength: ((w - inset * 2) / links) * 1.035,
+      linkWidth: 12,
+      density: 0.0015,
+      name: 'bridge',
+    });
+    for (const b of bridge.bodies) b.userData = PLANK;
+
+    // Pendulum on a distance joint (middle left).
+    const pivot = P.add({ name: 'pendulum-pivot', type: 'static', shape: rigidCircle(6), x: w * 0.22, y: 470, category: 0, mask: 0 });
+    const len = 150;
+    const bob = P.add({ name: 'bob', shape: rigidCircle(24), x: pivot.x + len * Math.sin(1.2), y: pivot.y + len * Math.cos(1.2), userData: BOB });
+    P.addJoint({ type: 'distance', name: 'rod', a: pivot, b: bob });
+
+    // Windmill: two welded arms on a motorized revolute joint (middle right).
+    const hub = P.add({ name: 'hub', type: 'static', shape: rigidCircle(8), x: w * 0.7, y: 600, category: 0, mask: 0 });
+    const armA = P.add({ name: 'arm-a', shape: rigidBox(230, 16), x: hub.x, y: hub.y, userData: ARM });
+    const armB = P.add({ name: 'arm-b', shape: rigidBox(230, 16), x: hub.x, y: hub.y, angle: Math.PI / 2, userData: ARM });
+    P.addJoint({ type: 'weld', name: 'cross', a: armA, b: armB });
+    P.addJoint({ type: 'revolute', name: 'motor', a: hub, b: armA, motorSpeed: 1.3, maxMotorTorque: 5e7 });
+
+    this.spawnRagdoll();
+  }
+
+  private spawnRagdoll(): void {
+    this.ragdoll?.remove();
+    const scale = 0.75;
+    const r = createRigidRagdoll(this.physics, {
+      x: this.stepW * 0.55,
+      y: this.stairTop - 86.5 * scale,
+      scale,
+      stiffness: this.stiff ? 1 : 0,
+      vx: 240,
+      name: 'guy',
+    });
+    for (const [name, b] of Object.entries(r.parts)) b.userData = RAGDOLL_LOOKS[name];
+    // A shove toward the stairs.
+    r.impulse(r.parts.torso.x, r.parts.torso.y - 20 * scale, 300 * r.parts.torso.mass, 0);
+    this.ragdoll = r;
+  }
+
+  /** Throws a ball from behind the top step on a flat arc that reaches the ragdoll's torso in 0.5 s. */
+  private throwBall(): void {
+    const target = this.ragdoll?.parts.torso;
+    if (!target || target.world === null) return;
+    const x0 = 30;
+    const y0 = Math.min(target.y, this.stairTop) - 130;
+    const T = 0.5;
+    const vx = (target.x - x0) / T;
+    const vy = (target.y - y0) / T - 0.5 * this.physics.gravityY * T;
+    const body = this.physics.add({ shape: rigidCircle(24), x: x0, y: y0, vx, vy, density: 0.003, restitution: 0.3, userData: BALL });
+    this.balls.push({ body, age: 0 });
+  }
+
+  private grab(e: PointerEvt): void {
+    if (this.drag) return;
+    const p = this.view.stageToWorld(e.x, e.y);
+    const hit = this.physics.queryPoint(p.x, p.y).find((b) => b.type === 'dynamic');
+    if (!hit) return;
+    const joint = this.physics.addJoint({ type: 'mouse', body: hit, target: p, maxForce: 60000 * Math.max(hit.mass, 1) });
+    this.drag = { joint, pointer: e.pointerId };
+  }
+
+  private think(dt: number): void {
+    this.time += dt;
+    const { w } = this.content;
+    if (this.crates < 4 && this.time >= this.nextCrate) {
+      this.crates++;
+      this.nextCrate += 1;
+      const x = w / 2 + this.rand.float(-w * 0.18, w * 0.18);
+      this.physics.add({ shape: rigidBox(52, 52), x, y: 190, angle: this.rand.float(-0.4, 0.4), friction: 0.6, userData: CRATE });
+    }
+    if (this.time >= this.nextBall) {
+      this.nextBall += 3.2;
+      this.throwBall();
+    }
+    if (this.time >= this.nextRagdoll) {
+      this.nextRagdoll += 9;
+      this.spawnRagdoll();
+    }
+    for (const b of this.balls) b.age += dt;
+    while (this.balls.length && (this.balls[0]!.age > 5 || this.balls.length > 3)) this.physics.remove(this.balls.shift()!.body);
+    this.runPhysics(dt);
+    const P = this.physics;
+    this.hud.text = `刚体 ${P.bodies.length}  ·  关节 ${P.joints.length}  ·  休眠 ${this.sleepingCount()}  ·  ${this.ms.toFixed(2)} ms  ·  ${this.stiff ? '主动' : '松弛'}`;
+  }
+
+  /** Distance joints as rods, the mouse joint as a dashed line. */
+  private paintRods(ctx: Ctx2D): void {
+    const t = this.physics.interpolate ? this.physics.alpha : 1;
+    ctx.lineCap = 'round';
+    for (const j of this.physics.joints) {
+      if (j.type !== 'distance' && j.type !== 'mouse') continue;
+      const a = j.anchorWorldA(t);
+      const b = j.anchorWorldB(t);
+      ctx.strokeStyle = j.type === 'mouse' ? 'rgba(250,204,21,0.9)' : '#94a3b8';
+      ctx.lineWidth = j.type === 'mouse' ? 3 : 5;
+      if (j.type === 'mouse') ctx.setLineDash([10, 8]);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      if (j.type === 'mouse') ctx.setLineDash([]);
+    }
+  }
+
+  /** Revolute pivots as small bolts. */
+  private paintPins(ctx: Ctx2D): void {
+    const t = this.physics.interpolate ? this.physics.alpha : 1;
+    ctx.fillStyle = 'rgba(15,23,42,0.55)';
+    for (const j of this.physics.joints) {
+      if (j.type !== 'revolute') continue;
+      const p = j.anchorWorldB(t);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, j.name === 'motor' ? 7 : 3, 0, TAU);
+      ctx.fill();
+    }
+  }
+}
+
 export const scenes: Record<string, SceneFactory> = {
   'rigid-stack': () => new RigidStackScene(),
   'rigid-plinko': () => new RigidPlinkoScene(),
+  'rigid-joints': () => new RigidJointsScene(),
 };

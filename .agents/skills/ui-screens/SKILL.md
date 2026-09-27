@@ -1,6 +1,6 @@
 ---
 name: ui-screens
-description: Builds and verifies game UI with the engine's ui module - mountScreen with the safe area, the typed ui.* builder and JSON buildUI specs, flexbox layout props and theme tokens (xs..xxl), the widget catalogue (buttons, icon buttons, labels, rich text, progress, slider, toggle, checkbox, segmented, tabs, grid, scroll/list, badge, stars, images, icons), modal/dialog/toast, themes (setUITheme, createUITheme), and the UI lint (roles, lint-* tags, pnpm shot --lint --bounds on three devices) with a fix for every lint rule. Use when creating or changing a HUD, menu, title screen, settings, pause or result dialog, shop, list or any text/button layout, or when fixing overlapping, cut-off, off-screen, low-contrast or too-small UI ("UI", "HUD", "menu", "screen", "button", "dialog", "popup", "layout", "safe area", "lint", "界面", "菜单", "按钮", "弹窗", "对话框", "布局", "刘海屏", "安全区").
+description: Builds and verifies game UI with the engine's ui module - mountScreen with the safe area, the typed ui.* builder and JSON buildUI specs, flexbox layout props and theme tokens (xs..xxl), the widget catalogue (buttons, icon buttons, labels, rich text, progress, slider, toggle, checkbox, segmented, tabs, grid, scroll/list, badge, stars, images, icons), modal/dialog/toast, themes (setUITheme, createUITheme), HUD that follows world objects (followNode, pinToNode, convertPoint, nodeRect) and keep-clear areas UI must not cover (lint-keep-clear), and the UI lint (roles, lint-* tags, pnpm shot --lint --bounds on three devices) with a fix for every lint rule. Use when creating or changing a HUD, menu, title screen, settings, pause or result dialog, shop, list or any text/button layout, or when fixing overlapping, cut-off, off-screen, low-contrast or too-small UI ("UI", "HUD", "menu", "screen", "button", "dialog", "popup", "layout", "safe area", "lint", "界面", "菜单", "按钮", "弹窗", "对话框", "布局", "刘海屏", "安全区").
 ---
 
 # UI screens
@@ -30,7 +30,8 @@ class MenuScene extends Scene {
 
 - `mountScreen(parent, content, opts)` puts `content` (a node or a `UISpec`) in a `UIScreen` that tracks an
   area every frame (resize, safe-area changes) and stretches the content to fill it. Returns `content`. `opts.area`: `'safe'` (default, `game.safe`), `'view'`
-  (whole visible area), a `Rect` or `() => Rect`. `opts.background` paints the whole view behind it.
+  (whole visible area), a `Rect`, or a getter `(parent) => Rect` in the mount parent's coordinates such as
+  `followNode(worldNode)` (section 7). `opts.background` paints the whole view behind it.
   `opts.safeArea` is a deprecated alias (`false` = `'view'`); omit it.
 - Mounting again on the same parent replaces the previous screen unless `replace: false`. For a HUD over a game
   world, mount into a dedicated child so other mounts survive:
@@ -51,7 +52,7 @@ Containers take `(props, children)`; leaves take their main value first. Childre
 | `ui.richText(markup, props)` | `RichText` | `[b] [i] [color=gold] [size=40] [icon=coin]` |
 | `ui.button(text or props, props)` | `Button` | `variant`, `size` sm/md/lg/xl, `icon`, `iconRight`, `badge`, `disabled`, `color` |
 | `ui.iconButton({ icon, label })` | `IconButton` | `size` sm 72 / md 88 / lg 104 / number, `shape` circle/rounded; always give `label` |
-| `ui.icon(src, props)` / `ui.image(src, props)` | `UIIcon` / `UIImage` | icon `size`, `color` (glyphs only); image `fit` contain/cover/fill |
+| `ui.icon(src, props)` / `ui.image(src, props)` | `UIIcon` / `UIImage` | icon `size`, `color` (glyphs only); both `tint` / `tintMode` / `duotone: [dark, light]` recolour textures (cached); image `fit` contain/cover/fill |
 | `ui.progress / slider / toggle / checkbox / segmented(props)` | controls | `value` + `onChange`; see references/widgets.md |
 | `ui.scroll(props, kids)` / `ui.list({ count, itemHeight, renderItem })` | `ScrollView` / `ListView` | list is virtualized; `list.refresh()` |
 | `ui.grid({ columns, cellAspect }, kids)` / `ui.tabs({ labels }, pages)` | `UIGrid` / `Tabs` | |
@@ -147,7 +148,8 @@ pnpm shot --app game --scene play --tap "#pause" --wait 0.5 --device "iphone-se,
 Quote comma lists in PowerShell (unquoted `a,b,c` becomes three words and the CLI rejects it). Output goes to
 `.shots/<app>-<scene>-<device>.png` (+ `-bounds.png`); `--lint` prints `formatLint` per device and sets exit
 code 1 on errors. `--tap <selector>` (repeatable) and `--wait <s>` open dialogs before the shot. Read the PNGs,
-especially `-bounds.png` (blue containers, green controls with lighter tap areas, yellow text, red/orange issues).
+especially `-bounds.png` (blue containers, green controls with lighter tap areas, yellow text, red/orange issues,
+cyan hatched keep-clear areas).
 
 Same check in a test (pattern of `game/play.test.ts`; `tests/ui-scenes.test.ts` does it for every sandbox UI scene):
 
@@ -176,7 +178,8 @@ Roles decide what lint checks: `control` (tappable: size, overlap), `surface` (t
 scroll view or the play area), `blocker` (backdrop: everything painted earlier under it is skipped),
 `decor` (ignored for overlaps/placement). Widgets set theirs; plain nodes use tags `lint-control`,
 `lint-surface`, `lint-blocker`, `lint-decor`, and `lint-ignore` skips a subtree (every `World` has it).
-Interactive nodes without a role count as controls.
+Interactive nodes without a role count as controls. `lint-keep-clear` marks a game-world area UI must not paint
+over, also inside a `lint-ignore` subtree (section 7).
 
 | Rule (severity) | Typical cause | Fix |
 |---|---|---|
@@ -194,8 +197,70 @@ Interactive nodes without a role count as controls.
 | `invisible-interactive` (error) | alpha ~0 node still interactive | `visible = false` or `interactive = false` while hidden |
 | `zero-size-interactive` (warn) | interactive node with no size | give it `width/height` or `hitPadding` |
 | `missing-texture` (warn) | icon/image name with no texture and no glyph | use a glyph name (below) or register the texture first |
+| `covers-keep-clear` (error) | a panel, button, text or icon over a `lint-keep-clear` world area (enemy, player, aim line) | lay out around it (`followNode`, safe-area columns); a deliberate translucent overlay gets `lintRole: 'decor'` |
 
 Tune per call only with a reason: `lintUI(root, game, { rules: { 'small-font': 'off' }, minTap: 72, ignore: (n) => n.id === 'debug' })`.
+
+## 7. HUD on world objects, keep-clear areas
+
+HUD that belongs to something in the game world (bars on a tower, a name tag over a unit, a button by a chest)
+follows that node instead of converting coordinates by hand, so it stays on it when the world scrolls, zooms,
+shakes or the screen resizes. Example: `archer/scenes/play.ts` (tower HUD), `archer/scenes/battle-fx.ts`.
+
+```ts
+import { convertPoint, followNode, mountScreen, Node, nodeRect, pinToNode, ui } from '@engine';
+
+// a laid-out screen filling the tower's face, re-laid out before every frame
+const hudLayer = this.add(new Node({ id: 'tower-hud', width: this.width, height: this.height }));
+mountScreen(hudLayer, ui.column({ align: 'center', gap: 8 }, [hpBar, jumpButton]), {
+  area: followNode(towerNode, { pad: [18, 10, 8, 10], minWidth: 150, minHeight: 160, anchor: { x: 0.5, y: 0 }, clamp: 'safe' }),
+});
+
+// one node pinned to a point of a world node, every frame after the world moved
+const stop = pinToNode(nameTag, enemyNode, { at: (e) => ({ x: e.width / 2, y: 0 }), offset: { x: 0, y: -12 }, hideWithTarget: true });
+
+// one-off conversions (null = stage): popups, flying coins
+const p = convertPoint(enemyNode, this.fxLayer, enemyNode.width / 2, 0);
+const box = nodeRect(towerNode, undefined, hudLayer); // its content box as an AABB in hudLayer's coordinates
+```
+
+- `followNode(target, opts)` returns a getter `(space?) => Rect`. Steps: the target's content box (or `rect`, a
+  local rect or `(target) => Rect`) as an axis-aligned box in `space` -> `offset` -> `clamp` (`'safe'`, `'view'`
+  or a stage `Rect`; each edge pushed inside) -> `pad` (inset, number or `[top, right, bottom, left]`, negative
+  grows) -> `minWidth` / `minHeight` grown around `anchor` (fractions of the box, default centre). `mountScreen`
+  passes the mount parent as `space`; elsewhere set `space` (or pass it to the getter; default stage). A destroyed
+  target keeps its last rect.
+- `pinToNode(node, target, opts)` sets `node.x/y` in `node.parent`'s space on every game `'update'` (after the stage
+  tick, before render); `at` defaults to the target's content-box centre; `hideWithTarget` copies
+  `target.worldVisible`. Stops when either node is destroyed; the returned function stops it too. Pin nodes that
+  no flex container positions.
+- The target needs a real box: give world nodes a `width/height` (and anchor) matching what they draw, or pass
+  `rect`. Don't chain `field.toWorld(...)` / `hud.toLocal(...)` or `field.x + x * field.scaleX` by hand.
+
+Keep-clear areas: tag the world nodes UI must never paint over (enemy, player, aim line) with `lint-keep-clear`;
+it works inside `lint-ignore` subtrees such as a `World`. `lintUI` then reports every visible control, panel,
+text, icon or image painted after the area that overlaps it by more than 2 units on both axes (`covers-keep-clear`,
+error, once per outermost node, `issue.other` = the area node). Decor, `lint-ignore` subtrees, and anything
+painted before the area or hidden under a later blocker (modal backdrop) don't count. `pnpm shot --lint` enforces
+it and `--bounds` hatches the areas in cyan.
+
+```ts
+// area = content box in local coordinates; a keepClearRect() method overrides it (e.g. bow + HP bar above)
+class EnemyNode extends Node {
+  keepClearRect(): Rect { return { x: -40, y: -60, w: this.width + 80, h: this.height + 60 }; }
+}
+const enemy = world.add(new EnemyNode({ tags: ['lint-keep-clear'], width: 80, height: 160 }));
+
+// areas without a node, per call: stage rects, { rect, name } or nodes (these count against all UI)
+lintUI(game.stage, game, { keepClear: [aimRect, { rect: bossRect, name: 'boss' }, chestNode] });
+keepClearZones(game.stage, game); // the active areas, in stage coordinates (tests)
+```
+
+- UI laid over a live scene (a start menu over the idle battle) can declare its own areas: a `lint-ignore` node
+  transformed like the world with `lint-keep-clear` children (archer `menu.ts`, `keepClearAreas`).
+- Overlays meant to sit on an area (a translucent zone panel) get `lintRole: 'decor'`.
+- Test the guarantee both ways: no `covers-keep-clear` issues, and moving a button onto the area makes one
+  (`archer/menu.test.ts`).
 
 ## Icons
 

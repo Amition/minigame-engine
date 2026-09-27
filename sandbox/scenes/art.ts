@@ -2,6 +2,7 @@ import {
   bakeTexture,
   Box,
   creatureFrames,
+  duotoneTexture,
   iconTexture,
   mirrorRows,
   palettes,
@@ -12,6 +13,9 @@ import {
   Sprite,
   svgTexture,
   Text,
+  textureStats,
+  tintTexture,
+  ui,
   type ArtShapeOptions,
   type ArtShape,
   type CreatureAnim,
@@ -235,6 +239,94 @@ class ArtGalleryScene extends DemoScene {
   }
 }
 
+/** White-on-transparent art with painted details (dark eye sockets, grey nose and teeth) to recolour. */
+const TINT_SKULL = `<svg viewBox="0 0 48 48">
+  <path d="M24 3C13 3 5 10.5 5 21c0 6.5 3.2 10.6 7.5 12.8V41a3 3 0 0 0 3 3h17a3 3 0 0 0 3-3v-7.2C39.8 31.6 43 27.5 43 21 43 10.5 35 3 24 3z" fill="#ffffff"/>
+  <ellipse cx="16.5" cy="22" rx="5.5" ry="6" fill="#000000"/><ellipse cx="31.5" cy="22" rx="5.5" ry="6" fill="#000000"/>
+  <path d="M24 28l-3.5 6h7z" fill="#5c5c5c"/>
+  <path d="M19 37v6M24 37v6M29 37v6" stroke="#8c8c8c" stroke-width="2.4"/>
+</svg>`;
+
+const TINT_COLORS = ['#ff6b6b', '#ffd43b', '#69db7c', '#4dabf7'];
+
+/** tintTexture / duotoneTexture, Sprite.tint and ui.icon tint / duotone on one white icon and a shaded white star. */
+class ArtTintScene extends DemoScene {
+  readonly title = 'Art · Tint + duotone';
+
+  protected build(): void {
+    const { x: x0, y: y0, w } = this.content;
+    const skull = svgTexture(TINT_SKULL, { width: 72, resolution: 2, key: 'tint-demo:skull' });
+    const star = shapeTexture('star', { size: 72, fill: '#ffffff', stroke: 'auto', shine: true, resolution: 2, key: 'tint-demo:star' });
+    const step = Math.min(110, (w - 64) / 6);
+    let y = y0 + 24;
+    const heading = (label: string) => {
+      this.add(new Text(label, { fontSize: 24, color: '#8a90a2' }, { x: x0 + 32, y }));
+      y += 40;
+    };
+    const cellX = (i: number) => x0 + 32 + step * (i + 0.5);
+    const place = (i: number, tex: Texture, id: string, backdrop?: string) => {
+      if (backdrop) this.add(new Box(96, 96, { fill: backdrop, radius: 18 }, { x: cellX(i), y: y + 48, anchor: 0.5 }));
+      return this.add(new Sprite(tex, { id, x: cellX(i), y: y + 48, anchor: 0.5 }));
+    };
+
+    heading('source: white art with painted details');
+    place(0, skull, 'tint-source-skull');
+    place(1, star, 'tint-source-star');
+    place(2, skull, 'tint-source-skull-light', '#d9d9de');
+    y += 112;
+
+    heading("tintTexture(src, color): 'multiply' keeps shading");
+    TINT_COLORS.forEach((c, i) => place(i, tintTexture(skull, c), `tint-multiply-${i}`));
+    place(4, tintTexture(star, '#ff922b'), 'tint-multiply-star-0');
+    place(5, tintTexture(star, '#b197fc'), 'tint-multiply-star-1');
+    y += 112;
+
+    heading("mode 'fill' (silhouette) and amount");
+    place(0, tintTexture(skull, '#ff6b6b', { mode: 'fill' }), 'tint-fill-0');
+    place(1, tintTexture(skull, '#1e1e22', { mode: 'fill' }), 'tint-fill-1', '#d9d9de');
+    place(2, tintTexture(skull, '#4dabf7', { mode: 'fill', amount: 0.5 }), 'tint-fill-half');
+    place(3, tintTexture(star, '#ffffff', { mode: 'fill', amount: 0.6 }), 'tint-fill-flash');
+    place(4, tintTexture(star, '#69db7c', { amount: 0.5 }), 'tint-multiply-half');
+    y += 112;
+
+    heading('duotoneTexture(src, dark, light): ink on buttons');
+    const duos: [string, string][] = [
+      ['#d9d9de', '#1e1e22'],
+      ['#ffb627', '#4a2500'],
+      ['#1e3a8a', '#bfdbfe'],
+      ['#2b1d0e', '#ffe8a3'],
+    ];
+    duos.forEach(([dark, light], i) => place(i, duotoneTexture(skull, dark, light), `tint-duotone-${i}`, dark));
+    y += 112;
+
+    heading('Sprite.tint and ui.icon tint / duotone (theme tokens)');
+    this.add(new Sprite(skull, { id: 'tint-sprite', x: cellX(0), y: y + 48, anchor: 0.5, tint: '#ff922b' }));
+    this.add(new Sprite(star, { id: 'tint-sprite-fill', x: cellX(1), y: y + 48, anchor: 0.5, tint: '#ffd43b', tintMode: 'fill' }));
+    const icons = [
+      ui.icon('tint-demo:skull', { id: 'tint-icon', size: 72, tint: 'primary' }),
+      ui.icon('tint-demo:skull', { id: 'tint-icon-duotone', size: 72, duotone: ['danger', 'onDanger'] }),
+      ui.icon('lock', { id: 'tint-icon-glyph', size: 72, tint: 'success' }),
+    ];
+    icons.forEach((icon, i) => {
+      icon.x = cellX(i + 2) - 36;
+      icon.y = y + 12;
+      this.add(icon);
+    });
+    y += 112;
+
+    const caption = this.add(new Text('textureStats', { fontSize: 22, color: '#8a90a2' }, { id: 'tint-stats', x: x0 + 32, y: y + 8 }));
+    let frame = 0;
+    caption.onUpdate(() => {
+      // Sprite / ui.icon tints bake on their first draw, so count after rendering started.
+      if (frame++ % 30 !== 1) return;
+      const stats = textureStats({ top: 500 }).top.filter((e) => e.key.startsWith('tint:') || e.key.startsWith('duotone:'));
+      const kb = stats.reduce((s, e) => s + e.bytes, 0) / 1024;
+      caption.text = `${stats.length} recoloured textures, ${kb.toFixed(0)} KB (textureStats)`;
+    });
+  }
+}
+
 export const scenes: Record<string, SceneFactory> = {
   'art-gallery': () => new ArtGalleryScene(),
+  'art-tint': () => new ArtTintScene(),
 };

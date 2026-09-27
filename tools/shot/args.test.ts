@@ -55,7 +55,6 @@ describe('shot args', () => {
       [['--wait', 'soon'], 'shot', /expects a number/],
       [['--drag', '#a'], 'shot', /<from>\|<to>/],
       [['--scene'], 'shot', /missing value/],
-      [['--out', 'x.png', '--device', 'iphone-se,ipad'], 'shot', /single --device/],
     ];
     for (const [argv, tool, msg] of bad) {
       expect(() => parseShotArgs(argv, tool), argv.join(' ')).toThrow(UsageError);
@@ -77,5 +76,24 @@ describe('shot args', () => {
     expect(shotUsage('shot')).not.toMatch(/--timeout <seconds>/);
     expect(shotUsage('shot:browser')).toMatch(/--timeout <seconds>/);
     expect(shotUsage('shot')).toMatch(/Only in pnpm shot:browser: --browser, --timeout/);
+  });
+
+  it('--out with several devices writes one file per device, the device name before the extension', () => {
+    for (const tool of ['shot', 'shot:browser'] as const) {
+      const a = parseShotArgs(['--out', '.shots/out.png', '--device', 'iphone-se,ipad'], tool);
+      expect(a.devices).toEqual(['iphone-se', 'ipad']);
+      expect(a.devices.map((d) => shotFile(tool, a, 's', d))).toEqual(['.shots/out-iphone-se.png', '.shots/out-ipad.png']);
+    }
+    const all = parseShotArgs(['--app', 'archer', '--device', 'all', '--out', 'x.png'], 'shot');
+    expect(all.devices.map((d) => shotFile('shot', all, 's', d))).toEqual([
+      'x-iphone-se-land.png',
+      'x-iphone-14-land.png',
+      'x-android-land.png',
+      'x-ipad-land.png',
+    ]);
+    const bare = parseShotArgs(['--out', 'shots/out', '--device', 'iphone-se,390x844@3'], 'shot');
+    expect(bare.devices.map((d) => shotFile('shot', bare, 's', d))).toEqual(['shots/out-iphone-se', 'shots/out-390x844@3']);
+    expect(shotFile('shot', parseShotArgs(['--out', 'one.png', '--device', 'ipad'], 'shot'), 's', 'ipad')).toBe('one.png');
+    expect(shotUsage('shot').replace(/\s+/g, ' ')).toMatch(/x\.png -> x-iphone-se\.png/);
   });
 });

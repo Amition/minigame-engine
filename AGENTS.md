@@ -20,7 +20,8 @@ So every feature must be inspectable from code: text dumps, lint reports, headle
   Landscape apps (app.json `"orientation": "landscape"`) use `iphone-se-land, iphone-14-land, android-land, ipad-land`;
   shot/bench/dev default to them and `--device all` picks the profiles of the app's orientation.
   `--dump` prints the node tree, `--lint` prints the UI lint report (exit 1 on errors), `--bounds` writes an
-  extra `-bounds.png` with hit areas / text boxes / issues drawn on top. `--help` lists everything.
+  extra `-bounds.png` with hit areas / text boxes / issues / keep-clear zones drawn on top. `--out <file.png>` with
+  several devices writes `<file>-<device>.png`. `--help` lists everything.
 - `pnpm shot:browser` — same options in real Chrome (falls back to Edge), plus `--input engine|touch|mouse`,
   `--browser`, `--timeout`; exits 1 on page console errors.
 - `pnpm dev [--port 5173]` — dev server with live reload; `/frame` shows 3 phones side by side; LAN URLs for phones.
@@ -68,8 +69,10 @@ When you change an engine API, update the matching skill in the same change.
 ```
 engine/            runtime engine, imported as '@engine' (engine/index.ts). Bundled into builds:
                    no node:*, no @napi-rs/canvas, no DOM/window/wx access outside engine/platform/.
-  core/            math, emitter, rng (seeded), color, game (loop/scaling/input), app (defineApp/runApp)
-  gfx/             Ctx2D/Surface types, Texture, textures registry, bakeTexture, draw helpers
+  core/            math, emitter, rng (seeded), color, game (loop/scaling/input), app (defineApp/runApp),
+                   geom (segment sweeps vs circle/capsule/rotated box, box frames, ballistics: ballisticAngle/Path)
+  gfx/             Ctx2D/Surface types, Texture, textures registry, bakeTexture, draw helpers,
+                   tintTexture / duotoneTexture (cached recolours; Sprite.tint, ui.icon tint/duotone)
   platform/        Platform interface (types.ts), current platform, adapters web / minigame (wx, tt, tap),
                    ads helper (configureAds / canShowAd / showRewardedAd, typed AppJsonConfig)
   scene/           Node, selector, dump, Sprite, Box, Text, Scene/SceneManager
@@ -83,10 +86,13 @@ engine/            runtime engine, imported as '@engine' (engine/index.ts). Bund
                    TileMap (ASCII maps, autotile, chunk prerender), IsoMap/IsoObject (heights, picking),
                    DepthSortLayer, GroundObject (z + shadow), PerspectiveRoad, PhysicsWorld/ArcadeBody,
                    RigidWorld/RigidBody (rigid*.ts: rotating circles + convex polygons, stacking, sleeping,
-                   contact events, sensors, raycast; bindRigidNode, drawRigidWorld, RigidDebugView),
+                   contact events, sensors, raycast; joints: distance/rope, revolute with limits/motor/spring,
+                   weld, mouse; presets createRigidRagdoll / createRigidChain; bindRigidNode, drawRigidWorld,
+                   RigidDebugView),
                    findGridPath (A*), distance fields, PathFollower
   ui/              flexbox layout, `ui.*` builder + buildUI(spec), widgets, modal/dialog/toast, themes,
-                   inspectUI / lintUI / formatLint / drawUIBounds
+                   inspectUI / lintUI / formatLint / drawUIBounds, followNode / pinToNode / nodeRect / convertPoint
+                   (UI that tracks world objects)
   art/             palettes + colour ramps, pixelSprite, SVG parser/renderer (svgTexture), 22 shapes, 46 icons
                    (registerIcons -> 'icon:<name>'), noise + tileable patterns, bake effects, creatures, TextureAtlas
   audio/           synth + DSP, sfxPresets/renderSfx, text music notation + songs, WAV, analysis, AudioManager,
@@ -144,6 +150,10 @@ tests/             cross-module tests
 - Plain nodes can declare a lint role by tag: `tags: ['lint-blocker']` for a hand-made backdrop (content under
   it is skipped), also `lint-decor`, `lint-surface`, `lint-control`. UI widgets set this themselves.
   `lint-ignore` skips a whole subtree; every `World` has it (game-world content is not UI).
+- Game-world areas UI must not cover (enemy, player, aim zone): tag a node `lint-keep-clear` (works inside a World)
+  or pass `lintUI(root, game, { keepClear: [rect] })`; covering UI is a `covers-keep-clear` error in `--lint`.
+- HUD that sits on a world object: `mountScreen(parent, spec, { area: followNode(worldNode, { pad, clamp: 'safe' }) })`,
+  single nodes `pinToNode(label, worldNode)`; never hand-write `field.x + X * field.scale`.
 
 ## Art and audio are code
 
@@ -166,7 +176,9 @@ tests/             cross-module tests
   PowerShell shows as a red NativeCommandError). See install output with `pnpm install --reporter=default`.
 - Tests: `createTestGame` renders only the last frame of each step/advance/tap by default (`render: 'every'` to
   count per-frame draws, `pixelRatio: 1` for faster shots); each test game starts with fresh save storage,
-  rng seed 1 and the default UI theme.
+  rng seed 1 and the default UI theme. Game tests that take no screenshots pass `render: 'none'` (lint and hit
+  tests still work: layout runs on undrawn frames). One 30 s timeout lives in vitest.config.ts: no per-test
+  timeouts. Balance tests over several seeds use `sweepSeeds` / `formatSweep` from '@engine/testing'.
 - New app folders must be covered by tsconfig/vitest includes (see the `make-a-game` skill).
 - Mini-game runtimes: no DOM, `performance.now()` is in microseconds on wx/tt (adapters convert), fonts default
   to `'sans-serif'`. Only real devtools/phones prove a platform works; the headless and browser shots do not.

@@ -1,6 +1,7 @@
 import type { Ctx2D } from '../gfx/types';
 import { Texture } from '../gfx/texture';
 import { textures } from '../gfx/textures';
+import { tintTexture, type TintMode, type TintTextureOptions } from '../gfx/tint';
 import { Node, type NodeOptions } from './node';
 
 /**
@@ -10,19 +11,36 @@ import { Node, type NodeOptions } from './node';
  */
 export type SpriteFit = 'stretch' | 'contain' | 'cover' | 'none';
 
+export interface SpriteOptions extends NodeOptions {
+  fit?: SpriteFit;
+  /** Recolours the texture (tintTexture): 'multiply' keeps shading, 'fill' paints a silhouette. */
+  tint?: string | null;
+  tintMode?: TintMode;
+}
+
+const FILL_TINT: TintTextureOptions = { mode: 'fill' };
+
 /** Draws a texture stretched to (width, height). Pass a Texture or a registry key. */
 export class Sprite extends Node {
   flipX = false;
   flipY = false;
   fit: SpriteFit = 'stretch';
+  /**
+   * Colour the texture is drawn in (null = as is), via the cached tintTexture bake. Use a few fixed colours
+   * (team colours, locked grey): every distinct colour bakes its own canvas.
+   */
+  tint: string | null = null;
+  tintMode: TintMode = 'multiply';
   private _texture: Texture | null = null;
 
-  constructor(texture?: Texture | string | null, opts?: NodeOptions & { fit?: SpriteFit }) {
+  constructor(texture?: Texture | string | null, opts?: SpriteOptions) {
     super();
     if (texture) this.setTexture(texture);
     if (opts) {
       this.set(opts);
       if (opts.fit) this.fit = opts.fit;
+      if (opts.tint !== undefined) this.tint = opts.tint;
+      if (opts.tintMode) this.tintMode = opts.tintMode;
     }
   }
 
@@ -49,8 +67,9 @@ export class Sprite extends Node {
   }
 
   override draw(ctx: Ctx2D): void {
-    const t = this._texture;
+    let t = this._texture;
     if (!t) return;
+    if (this.tint) t = tintTexture(t, this.tint, this.tintMode === 'fill' ? FILL_TINT : undefined);
     if (this.flipX || this.flipY) {
       ctx.save();
       ctx.translate(this.flipX ? this.width : 0, this.flipY ? this.height : 0);
@@ -101,6 +120,8 @@ export class Sprite extends Node {
       ...super.describe(),
       tex: this._texture?.key || (this._texture ? '(anon)' : '(none)'),
       fit: this.fit === 'stretch' ? undefined : this.fit,
+      tint: this.tint || undefined,
+      tintMode: this.tint && this.tintMode !== 'multiply' ? this.tintMode : undefined,
     };
   }
 }

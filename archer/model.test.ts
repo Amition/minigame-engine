@@ -1,4 +1,5 @@
 import { Rng } from '@engine';
+import { formatSweep, sweepSeeds } from '@engine/testing';
 import { describe, expect, it } from 'vitest';
 import { JUMP_COST, NO_UPGRADES, playerStats, SHOT_COST, type ArrowId } from './config';
 import { MENU_ENEMY_TOP, MENU_ENEMY_X, TOWER_TOP } from './layout';
@@ -515,10 +516,9 @@ describe('battle model', () => {
     expect(t).toBeLessThan(150);
   });
 
-  it('un-upgraded bots typically kill a handful of enemies in a 1-3 minute run', () => {
-    const bot = (sd: number, wait: number) => {
-      const results: { kills: number; time: number }[] = [];
-      for (const seed of [1, 2, 3, 4, 5, 6]) {
+  it('un-upgraded bots typically kill a handful of enemies in a 1-3 minute run', async () => {
+    const bot = (sd: number, wait: number) =>
+      sweepSeeds([1, 2, 3, 4, 5, 6], (seed) => {
         const m = new BattleModel({ seed });
         const r = new Rng(seed * 31);
         m.beginDraw();
@@ -531,24 +531,20 @@ describe('battle model', () => {
           }
           for (let i = 0; i < wait; i++) m.step(DT);
         }
-        results.push({ kills: m.score, time: Math.round(m.time) });
-      }
-      const median = (a: number[]) => {
-        const s = [...a].sort((x, y) => x - y);
-        return (s[2]! + s[3]!) / 2;
-      };
-      return { kills: median(results.map((r) => r.kills)), time: median(results.map((r) => r.time)), all: JSON.stringify(results) };
-    };
-    const good = bot(0.045, 24);
-    expect(good.kills, good.all).toBeGreaterThanOrEqual(6);
-    expect(good.kills, good.all).toBeLessThanOrEqual(12);
-    expect(good.time, good.all).toBeGreaterThanOrEqual(55);
-    expect(good.time, good.all).toBeLessThanOrEqual(180);
-    const casual = bot(0.08, 100);
-    expect(casual.kills, casual.all).toBeGreaterThanOrEqual(4);
-    expect(casual.kills, casual.all).toBeLessThanOrEqual(good.kills);
-    expect(casual.time, casual.all).toBeGreaterThanOrEqual(55);
-  }, 60_000);
+        return { kills: m.score, time: Math.round(m.time) };
+      });
+    const good = await bot(0.045, 24);
+    const goodAll = formatSweep(good);
+    expect(good.kills.median, goodAll).toBeGreaterThanOrEqual(6);
+    expect(good.kills.median, goodAll).toBeLessThanOrEqual(12);
+    expect(good.time.median, goodAll).toBeGreaterThanOrEqual(55);
+    expect(good.time.median, goodAll).toBeLessThanOrEqual(180);
+    const casual = await bot(0.08, 100);
+    const casualAll = formatSweep(casual);
+    expect(casual.kills.median, casualAll).toBeGreaterThanOrEqual(4);
+    expect(casual.kills.median, casualAll).toBeLessThanOrEqual(good.kills.median);
+    expect(casual.time.median, casualAll).toBeGreaterThanOrEqual(55);
+  });
 
   it('only loadout arrows can be selected; setLoadout works in the menu only', () => {
     const m = new BattleModel({ seed: 16 });

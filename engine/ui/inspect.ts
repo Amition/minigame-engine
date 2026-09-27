@@ -3,7 +3,7 @@ import { Game } from '../core/game';
 import type { Rect } from '../core/math';
 import type { Ctx2D } from '../gfx/types';
 import { Box } from '../scene/box';
-import type { Node } from '../scene/node';
+import { Node } from '../scene/node';
 import { Sprite } from '../scene/sprite';
 import { Text } from '../scene/text';
 import { Button, UI_MIN_TAP } from './button';
@@ -139,7 +139,8 @@ export type UILintRule =
   | 'empty-label'
   | 'invisible-interactive'
   | 'zero-size-interactive'
-  | 'missing-texture';
+  | 'missing-texture'
+  | 'covers-keep-clear';
 
 /** Default severity of each rule. */
 export const UI_LINT_RULES: Record<UILintRule, UILintSeverity> = {
@@ -157,6 +158,7 @@ export const UI_LINT_RULES: Record<UILintRule, UILintSeverity> = {
   'invisible-interactive': 'error',
   'zero-size-interactive': 'warn',
   'missing-texture': 'warn',
+  'covers-keep-clear': 'error',
 };
 
 export interface UILintIssue {
@@ -168,9 +170,25 @@ export interface UILintIssue {
   /** Stage rect of the node (visible part). */
   rect: Rect;
   message: string;
-  /** The other node for overlap / duplicate issues. */
+  /** The other node for overlap / duplicate issues (the keep-clear node for covers-keep-clear). */
   other?: Node;
 }
+
+/**
+ * A game-world area UI must not paint over (rule covers-keep-clear), in stage coordinates. Sources: nodes tagged
+ * `lint-keep-clear` anywhere in the linted tree, also inside `lint-ignore` subtrees such as a World (area: the
+ * node's `keepClearRect()` in its local coordinates when it has that method, else its content box), and
+ * `UILintOptions.keepClear`.
+ */
+export interface UIKeepClearZone {
+  name: string;
+  rect: Rect;
+  /** The tagged node (or the node passed in options). */
+  node?: Node;
+}
+
+/** Keep-clear zone given in lint options: a stage rect, a node (like a tagged node) or a named stage rect. */
+export type UIKeepClearInput = Rect | Node | { rect: Rect; name?: string };
 
 export interface UILintOptions {
   /** Change severities or turn rules off: `{ 'outside-safe': 'off', 'small-font': 'error' }`. */
@@ -181,8 +199,10 @@ export interface UILintOptions {
   minFont?: number;
   /** Minimum text/background contrast ratio (default 3). */
   minContrast?: number;
-  /** Skip these nodes and their subtrees. */
+  /** Skip these nodes and their subtrees (keep-clear zones inside them still count). */
   ignore?: (n: Node) => boolean;
+  /** Extra keep-clear zones (stage coordinates), checked against all UI like tagged `lint-keep-clear` nodes. */
+  keepClear?: readonly UIKeepClearInput[];
 }
 
 type Role = 'control' | 'surface' | 'blocker' | 'decor' | 'none';
@@ -267,11 +287,34 @@ function bgOf(n: Node): Bg | null {
   return null;
 }
 
-function collect(root: Node, ignore?: (n: Node) => boolean): Item[] {
+interface Zone extends UIKeepClearZone {
+  /** Paint position: items with order >= this are painted over the zone (-1 = below everything). */
+  order: number;
+  occluded: boolean;
+}
+
+function zoneOf(n: Node, order: number): Zone {
+  const own = (n as { keepClearRect?: () => Rect | null }).keepClearRect;
+  const local = typeof own === 'function' ? own.call(n) : null;
+  const rect = local ? n.worldMatrix().applyRect(local) : n.worldBounds();
+  return { name: uiNodeName(n), rect, node: n, order, occluded: false };
+}
+
+function collect(root: Node, ignore?: (n: Node) => boolean, zones?: Zone[]): Item[] {
   const items: Item[] = [];
+  const findZones = (n: Node) => {
+    n.walk((c) => {
+      if (!c.visible || c.alpha <= 0 || c.destroyed) return false;
+      if (c.tags.has('lint-keep-clear')) zones!.push(zoneOf(c, items.length));
+    });
+  };
   const visit = (n: Node, clip: Rect | null, alpha: number, disabled: boolean, decor: boolean) => {
     if (!n.visible || n.destroyed) return;
-    if (n !== root && (n.tags.has('lint-ignore') || (ignore && ignore(n)))) return;
+    if (n !== root && (n.tags.has('lint-ignore') || (ignore && ignore(n)))) {
+      if (zones && alpha > 0) findZones(n);
+      return;
+    }
+    if (zones && n.tags.has('lint-keep-clear') && alpha * n.alpha > 0) zones.push(zoneOf(n, items.length));
     const a = alpha * n.alpha;
     const rect = n.worldBounds();
     const vis = clip ? intersect(rect, clip) : rect;
@@ -305,7 +348,57 @@ function collect(root: Node, ignore?: (n: Node) => boolean): Item[] {
       if (intersect(it.vis, b.vis)) it.occluded = true;
     }
   }
+  if (zones) occludeZones(items, zones);
   return items;
+}
+
+/** Zones under a blocker painted later (a modal backdrop) no longer need to stay clear. */
+function occludeZones(items: readonly Item[], zones: Zone[]): void {
+  for (const z of zones) {
+    for (const b of items) {
+      if (b.role !== 'blocker' || b.alpha <= 0.05 || !b.vis || b.order < z.order) continue;
+      if (z.node && z.node.isDescendantOf(b.n)) continue;
+      if (intersect(z.rect, b.vis)) z.occluded = true;
+    }
+  }
+}
+
+function optionZones(list: readonly UIKeepClearInput[] | undefined): Zone[] {
+  if (!list) return [];
+  return list.map((z, i): Zone => {
+    if (z instanceof Node) return zoneOf(z, -1);
+    if ('rect' in z) return { name: z.name ?? `keepClear[${i}]`, rect: { ...z.rect }, order: -1, occluded: false };
+    return { name: `keepClear[${i}]`, rect: { x: z.x, y: z.y, w: z.w, h: z.h }, order: -1, occluded: false };
+  });
+}
+
+/** Tagged plus option zones of a tree, skipping empty ones and zones hidden under a modal backdrop. */
+function activeZones(items: readonly Item[], tagged: Zone[], opts: UILintOptions): Zone[] {
+  const extra = optionZones(opts.keepClear);
+  occludeZones(items, extra);
+  return [...tagged, ...extra].filter((z) => !z.occluded && z.rect.w > 0 && z.rect.h > 0);
+}
+
+/**
+ * Keep-clear zones lintUI checks in this tree (tagged `lint-keep-clear` nodes, including inside `lint-ignore`
+ * subtrees, plus `opts.keepClear`), without those covered by a modal backdrop. Tests use it to prove a lint run
+ * really had the zones it should: `expect(keepClearZones(stage).map((z) => z.name)).toContain('Node#enemy-zone')`.
+ */
+export function keepClearZones(root?: Node, game: Game | null = Game.current, opts: UILintOptions = {}): UIKeepClearZone[] {
+  const r = root ?? game?.stage;
+  if (!r) return [];
+  flushUILayout(r);
+  const tagged: Zone[] = [];
+  const items = collect(r, opts.ignore, tagged);
+  return activeZones(items, tagged, opts).map(({ name, rect, node }) => (node ? { name, rect, node } : { name, rect }));
+}
+
+/** Items that count as covering: controls, touch surfaces, text, icons/images and filled panels (not decor). */
+function paints(it: Item): boolean {
+  if (it.decor || it.role === 'blocker') return false;
+  if (it.role === 'control' || it.role === 'surface') return true;
+  if (it.text && it.text.text.trim() !== '') return true;
+  return it.n instanceof UIIcon || it.n instanceof UIImage || it.bg !== null;
 }
 
 function blend(under: RGBA, over: RGBA, a: number): RGBA {
@@ -351,7 +444,8 @@ export function lintUI(root?: Node, game: Game | null = Game.current, opts: UILi
   const r = root ?? game?.stage;
   if (!r) return [];
   flushUILayout(r);
-  const items = collect(r, opts.ignore);
+  const tagged: Zone[] = [];
+  const items = collect(r, opts.ignore, tagged);
   const out: UILintIssue[] = [];
   const minTap = opts.minTap ?? UI_MIN_TAP;
   const minFont = opts.minFont ?? 20;
@@ -401,6 +495,19 @@ export function lintUI(root?: Node, game: Game | null = Game.current, opts: UILi
       if (a.decor || b.decor || isAncestorPair(a.n, b.n)) continue;
       const x = intersect(a.vis!, b.vis!);
       if (x && x.w > 2 && x.h > 2) report('text-overlap', b, `overlaps ${uiNodeName(a.n)} ${fmtRect(a.vis!)} by ${R(x.w)}x${R(x.h)}`, a.n);
+    }
+  }
+
+  // keep-clear zones: UI painted over them (outermost covering node per zone)
+  for (const z of activeZones(items, tagged, opts)) {
+    const hits: Node[] = [];
+    for (const it of live) {
+      if (it.order < z.order || !paints(it) || (z.node && (it.n === z.node || isAncestorPair(it.n, z.node)))) continue;
+      if (hits.some((h) => it.n.isDescendantOf(h))) continue;
+      const x = intersect(it.vis!, z.rect);
+      if (!x || x.w <= 2 || x.h <= 2) continue;
+      hits.push(it.n);
+      report('covers-keep-clear', it, `covers keep-clear ${z.name} ${fmtRect(z.rect)} by ${R(x.w)}x${R(x.h)}`, z.node);
     }
   }
 
@@ -510,17 +617,20 @@ export interface UIBoundsOptions {
   labels?: boolean;
   /** Outline containers too (default true). */
   containers?: boolean;
+  /** Extra keep-clear zones, as in UILintOptions (also passed to the lint run). */
+  keepClear?: UILintOptions['keepClear'];
 }
 
 /**
  * Debug overlay in stage coordinates: containers (blue), controls (green, tap area lighter), text (yellow),
- * lint issues (red = error, orange = warn). Use as a screenshot overlay:
+ * keep-clear zones (cyan, hatched), lint issues (red = error, orange = warn). Use as a screenshot overlay:
  * `t.screenshot(file, { overlay: (ctx, game) => drawUIBounds(ctx, game.stage, { game }) })`.
  */
 export function drawUIBounds(ctx: Ctx2D, root: Node, opts: UIBoundsOptions = {}): void {
   const game = opts.game === undefined ? Game.current : opts.game;
   flushUILayout(root);
-  const items = collect(root);
+  const tagged: Zone[] = [];
+  const items = collect(root, undefined, tagged);
   ctx.save();
   ctx.lineWidth = 2;
   const stroke = (r: Rect, color: string, width = 2) => {
@@ -557,7 +667,27 @@ export function drawUIBounds(ctx: Ctx2D, root: Node, opts: UIBoundsOptions = {})
       stroke(it.vis, 'rgba(80,160,255,0.6)', 1);
     }
   }
-  const issues = opts.lint === false ? [] : Array.isArray(opts.lint) ? opts.lint : lintUI(root, game ?? null);
+  const cyan = 'rgba(0,230,255,0.95)';
+  for (const z of activeZones(items, tagged, { keepClear: opts.keepClear })) {
+    const r = z.rect;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(0,230,255,0.45)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let d = -r.h; d < r.w; d += 16) {
+      ctx.moveTo(r.x + d, r.y + r.h);
+      ctx.lineTo(r.x + d + r.h, r.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+    stroke(r, cyan, 2);
+    tag(r, `keep-clear ${z.name}`, cyan);
+  }
+  const issues =
+    opts.lint === false ? [] : Array.isArray(opts.lint) ? opts.lint : lintUI(root, game ?? null, { keepClear: opts.keepClear });
   for (const i of issues as readonly UILintIssue[]) {
     const color = i.severity === 'error' ? 'rgba(255,50,50,1)' : 'rgba(255,150,0,1)';
     stroke(i.rect, color, 4);

@@ -1,6 +1,7 @@
 import type { Ctx2D } from '../gfx/types';
 import { Node, type NodeOptions } from '../scene/node';
 import type { RigidBody } from './rigid-body';
+import { RigidRevoluteJoint, type RigidJoint } from './rigid-joint';
 import type { RigidWorld } from './rigid-world';
 
 export interface RigidBindOptions {
@@ -42,6 +43,7 @@ export interface RigidDrawColors {
   sensor: string;
   contact: string;
   aabb: string;
+  joint: string;
 }
 
 export interface RigidDrawOptions {
@@ -50,6 +52,8 @@ export interface RigidDrawOptions {
   lineWidth?: number;
   /** Contact points and normals of touching contacts. Default true. */
   contacts?: boolean;
+  /** Joints: anchor dots, a line between the anchors, thin lines to the body centres, revolute limit arcs. Default true. */
+  joints?: boolean;
   /** Body AABBs. Default false. */
   aabbs?: boolean;
   /** Blend poses from the previous step (0..1); default 1 = current poses. */
@@ -65,12 +69,13 @@ const DEFAULT_COLORS: RigidDrawColors = {
   sensor: '#34d399',
   contact: '#f43f5e',
   aabb: 'rgba(255,255,255,0.25)',
+  joint: '#c084fc',
 };
 
 /**
  * Debug-draws a RigidWorld in physics space (set the transform before calling): shapes coloured by type,
- * sleeping bodies grey, sensors dashed green, a radius line showing each circle's rotation, and contact points
- * with normals.
+ * sleeping bodies grey, sensors dashed green, a radius line showing each circle's rotation, contact points
+ * with normals, and joints (violet anchor dots and lines; revolute limits as an arc with a tick for the angle).
  */
 export function drawRigidWorld(ctx: Ctx2D, world: RigidWorld, opts: RigidDrawOptions = {}): void {
   const colors = { ...DEFAULT_COLORS, ...opts.colors };
@@ -152,7 +157,65 @@ export function drawRigidWorld(ctx: Ctx2D, world: RigidWorld, opts: RigidDrawOpt
       }
     }
   }
+  if (opts.joints ?? true) for (const j of world.joints) drawJoint(ctx, j, colors.joint, lw, alpha);
   ctx.restore();
+}
+
+function drawJoint(ctx: Ctx2D, j: RigidJoint, color: string, lw: number, alpha: number): void {
+  const pa = j.anchorWorldA(alpha);
+  const pb = j.anchorWorldB(alpha);
+  const bx = (b: RigidBody) => (alpha >= 1 ? b.x : b.prevX + (b.x - b.prevX) * alpha);
+  const by = (b: RigidBody) => (alpha >= 1 ? b.y : b.prevY + (b.y - b.prevY) * alpha);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.45;
+  ctx.lineWidth = Math.max(1, lw * 0.5);
+  ctx.beginPath();
+  if (j.type !== 'mouse') {
+    ctx.moveTo(bx(j.a), by(j.a));
+    ctx.lineTo(pa.x, pa.y);
+  }
+  ctx.moveTo(bx(j.b), by(j.b));
+  ctx.lineTo(pb.x, pb.y);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = lw;
+  if (j.type === 'mouse') ctx.setLineDash([lw * 3, lw * 2]);
+  ctx.beginPath();
+  ctx.moveTo(pa.x, pa.y);
+  ctx.lineTo(pb.x, pb.y);
+  ctx.stroke();
+  if (j.type === 'mouse') ctx.setLineDash([]);
+  const r = Math.max(3, lw * 2);
+  ctx.beginPath();
+  ctx.arc(pa.x, pa.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(pb.x, pb.y, r * 0.7, 0, Math.PI * 2);
+  ctx.fill();
+  if (j instanceof RigidRevoluteJoint && j.limitsEnabled) {
+    // Arc = allowed directions of the line from the pivot to b's centre; tick = that line now.
+    const a = j.a;
+    const b = j.b;
+    const angA = alpha >= 1 ? a.angle : a.prevAngle + (a.angle - a.prevAngle) * alpha;
+    const angB = alpha >= 1 ? b.angle : b.prevAngle + (b.angle - b.prevAngle) * alpha;
+    const phi = Math.atan2(-j.localAnchorB.y, -j.localAnchorB.x);
+    const base = angA + j.referenceAngle + phi;
+    const lo = j.lowerAngle === -Infinity ? -Math.PI : Math.max(-Math.PI, j.lowerAngle);
+    const hi = j.upperAngle === Infinity ? Math.PI : Math.min(Math.PI, j.upperAngle);
+    const rad = Math.max(10, lw * 7);
+    ctx.globalAlpha = 0.7;
+    ctx.lineWidth = Math.max(1, lw * 0.75);
+    ctx.beginPath();
+    ctx.arc(pb.x, pb.y, rad, base + lo, base + hi);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pb.x, pb.y);
+    ctx.lineTo(pb.x + Math.cos(angB + phi) * rad * 1.3, pb.y + Math.sin(angB + phi) * rad * 1.3);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = lw;
+  }
 }
 
 /** A node that debug-draws a RigidWorld in its local space (put it in the container holding the physics). */
@@ -178,6 +241,12 @@ export class RigidDebugView extends Node {
   override describe() {
     let sleeping = 0;
     for (const b of this.world.bodies) if (b.sleeping) sleeping++;
-    return { ...super.describe(), bodies: this.world.bodies.length, sleeping, contacts: this.world.contacts.length };
+    return {
+      ...super.describe(),
+      bodies: this.world.bodies.length,
+      sleeping,
+      contacts: this.world.contacts.length,
+      joints: this.world.joints.length,
+    };
   }
 }

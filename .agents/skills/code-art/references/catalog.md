@@ -85,7 +85,8 @@ when width/height are multiples of `size`). Default colors: `patternDefaults[nam
 | `outlineTexture(tex, { color, width: 2 })` | outline around opaque pixels |
 | `glowTexture(tex, { color, blur: 10, strength })` | soft glow (texture grows by blur) |
 | `dropShadowTexture(tex, { color, blur, x, y })` | shadow under the sprite |
-| `tintTexture(tex, color, { amount, mode: 'fill' | 'multiply' })` | color overlay |
+| `tintTexture(tex or key, color, { mode: 'multiply' | 'fill', amount, resolution, method })` | cached recolour: multiply (default, white -> color, shading kept) or silhouette; see "Tinting and recolouring textures" |
+| `duotoneTexture(tex or key, dark, light, { resolution })` | cached brightness map black -> dark, white -> light |
 | `silhouetteTexture(tex, color = '#000000')` | flat shape (hit flashes, shadows, locked items) |
 | `recolorTexture(tex, { '#from': '#to' }, { tolerance })` | palette swaps (team colors, skins) |
 | `flipTexture(tex, 'x' | 'y' | 'xy')`, `resampleTexture(tex, scale, { smooth })` | mirror / crisp pixel upscale |

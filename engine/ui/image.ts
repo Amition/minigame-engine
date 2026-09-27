@@ -1,8 +1,9 @@
 import { roundRectPath } from '../gfx/draw';
+import type { TintMode } from '../gfx/tint';
 import type { Ctx2D } from '../gfx/types';
-import { drawUIGlyph, resolveUITexture, uiIconName, type UIIconSource } from './icon';
+import { drawUIGlyph, resolveUITexture, uiDuotoneName, uiIconName, uiRecolorTexture, type UIIconSource } from './icon';
 import type { Size } from './layout';
-import { uiColor, uiRadius } from './theme';
+import { uiColor, uiRadius, type UIColor } from './theme';
 import { UIView, type UIBoxProps, type UINodeProps } from './view';
 
 export type UIImageFit = 'contain' | 'cover' | 'fill';
@@ -11,6 +12,12 @@ export interface ImageProps extends UINodeProps, UIBoxProps {
   src?: UIIconSource | null;
   /** How the texture fills the box (default 'contain'). */
   fit?: UIImageFit;
+  /** Recolours the texture (tintTexture, cached): 'multiply' turns white into this colour, shading kept. */
+  tint?: UIColor | null;
+  /** Default 'multiply'; 'fill' paints a flat silhouette. */
+  tintMode?: TintMode;
+  /** [dark, light]: brightness black -> dark, white -> light (duotoneTexture); wins over `tint`. */
+  duotone?: [UIColor, UIColor] | null;
 }
 
 /**
@@ -20,11 +27,17 @@ export interface ImageProps extends UINodeProps, UIBoxProps {
 export class UIImage extends UIView {
   src: UIIconSource | null;
   fit: UIImageFit;
+  tint: UIColor | null;
+  tintMode: TintMode;
+  duotone: [UIColor, UIColor] | null;
 
   constructor(props: ImageProps = {}) {
     super(props, 'Image');
     this.src = props.src ?? null;
     this.fit = props.fit ?? 'contain';
+    this.tint = props.tint ?? null;
+    this.tintMode = props.tintMode ?? 'multiply';
+    this.duotone = props.duotone ?? null;
   }
 
   get missing(): boolean {
@@ -51,9 +64,9 @@ export class UIImage extends UIView {
     const w = this.width;
     const h = this.height;
     if (w <= 0 || h <= 0) return;
-    const tex = resolveUITexture(this.src);
+    const src = resolveUITexture(this.src);
     const r = uiRadius(this.radius, w, h);
-    if (!tex) {
+    if (!src) {
       ctx.beginPath();
       roundRectPath(ctx, 0, 0, w, h, r === 0 ? Math.min(w, h) * 0.12 : r);
       ctx.fillStyle = 'rgba(255,255,255,0.08)';
@@ -65,6 +78,7 @@ export class UIImage extends UIView {
       drawUIGlyph(ctx, 'question', (w - s) / 2, (h - s) / 2, s, uiColor('textDim'));
       return;
     }
+    const tex = uiRecolorTexture(src, this.tint, this.tintMode, this.duotone);
     const clip = this.fit === 'cover' || r !== 0;
     if (clip) {
       ctx.save();
@@ -86,6 +100,14 @@ export class UIImage extends UIView {
   }
 
   override describe() {
-    return { ...super.describe(), src: uiIconName(this.src) || undefined, fit: this.fit, missing: this.missing || undefined };
+    return {
+      ...super.describe(),
+      src: uiIconName(this.src) || undefined,
+      fit: this.fit,
+      tint: this.tint || undefined,
+      tintMode: this.tint && this.tintMode !== 'multiply' ? this.tintMode : undefined,
+      duotone: uiDuotoneName(this.duotone),
+      missing: this.missing || undefined,
+    };
   }
 }

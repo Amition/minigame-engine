@@ -14,7 +14,7 @@ let wx: BuildResult;
 beforeAll(async () => {
   out = mkdtempSync(join(tmpdir(), 'engine-build-test-'));
   [web, wx] = (await buildTargets(['web', 'wx'], { app: join(ROOT, 'sandbox'), out, log: () => {} })) as [BuildResult, BuildResult];
-}, 120_000);
+});
 
 afterAll(() => {
   if (out) rmSync(out, { recursive: true, force: true });

@@ -2,6 +2,7 @@ import {
   canShowAd,
   createInputActions,
   fixedUpdate,
+  followNode,
   isAudioMuted,
   mountScreen,
   Node,
@@ -24,13 +25,14 @@ import {
   ui,
   wait,
   type AimInfo,
+  type FollowNodeOptions,
   type Label,
   type Rect,
 } from '@engine';
 import { ART_KEYS } from '../art/index';
 import { arrowDef, COLORS, JUMP_COST, SHOT_COST, type ArrowId } from '../config';
-import { screenLayout, TOWER_TOP, TOWER_X, type ScreenLayout } from '../layout';
-import { BattleModel, launchSpeed, TOWER_W, type BattleEvent, type Fighter, type Platform } from '../model';
+import { screenLayout, type ScreenLayout } from '../layout';
+import { BattleModel, launchSpeed, type BattleEvent, type Fighter, type Platform } from '../model';
 import { addSkulls, archerSave, currentStats, loadout, recordRun, trials } from '../save';
 import { J } from '../types';
 import { BattleFx } from './battle-fx';
@@ -46,6 +48,11 @@ export const PULL_DISTANCE = 220;
 /** Drags shorter than this keep the current aim at zero pull. */
 export const DEAD_ZONE = 10;
 export const TOWER_HUD_W = 150;
+/**
+ * Tower HUD area: the tower face 18 below its top, 10 in from each side (at least TOWER_HUD_W wide and 160 tall,
+ * growing downward), ending 8 above the bottom of the safe area.
+ */
+export const TOWER_HUD_AREA: FollowNodeOptions = { pad: [18, 10, 8, 10], minWidth: TOWER_HUD_W, minHeight: 160, anchor: { x: 0.5, y: 0 }, clamp: 'safe' };
 const SWITCH_W = 132;
 const SWITCH_H = 88;
 
@@ -104,6 +111,7 @@ export class PlayScene extends Scene {
     this.field.add(new ArrowLayer(() => this.model.arrows, { id: 'arrows' }));
     this.preview = this.field.add(new TrajectoryPreview({ id: 'trajectory', visible: false }));
     this.fxLayer = this.field.add(new Node({ id: 'fx' }));
+    this.syncWorld();
 
     this.zone = this.add(new Node({ id: 'aim-zone', tags: ['lint-surface'] }));
     this.buildTowerHud();
@@ -172,16 +180,6 @@ export class PlayScene extends Scene {
     this.zone.height = zone.h;
   }
 
-  /** Tower face below the player, scene coordinates. */
-  private towerRect(): Rect {
-    const { field } = this.layout;
-    const cx = field.x + TOWER_X * field.scale;
-    const top = field.y + TOWER_TOP * field.scale;
-    const w = Math.max(TOWER_HUD_W, TOWER_W * field.scale - 20);
-    const bottom = Math.min(this.game.safe.y + this.game.safe.h, this.height) - 8;
-    return { x: cx - w / 2, y: top + 18, w, h: Math.max(160, bottom - top - 18) };
-  }
-
   /** Arrow switcher strip: right of the operation zone, along the top. */
   private switcherRect(): Rect {
     const safe = this.game.safe;
@@ -232,7 +230,7 @@ export class PlayScene extends Scene {
         ui.spacer(4),
         jump,
       ]),
-      { area: () => this.towerRect() },
+      { area: followNode(this.platformNodes.get(this.model.tower)!, TOWER_HUD_AREA) },
     );
   }
 
@@ -339,6 +337,27 @@ export class PlayScene extends Scene {
 
   private sync(): void {
     const m = this.model;
+    this.syncWorld();
+    this.hpBar.setValue(m.hp, m.maxHp);
+    this.staminaBar.setValue(m.stamina, m.maxStamina);
+    this.staminaBar.low = m.state === 'playing' && m.stamina < SHOT_COST;
+
+    const drawing = m.drawing && this.aiming;
+    this.preview.visible = drawing;
+    if (drawing) {
+      const angle = m.player.aimAngle;
+      this.preview.angle = angle;
+      this.preview.speed = launchSpeed(Math.max(0.2, m.draw));
+      this.preview.origin = m.muzzle(m.player, angle);
+      this.preview.strength = m.draw >= 0.2 ? 1 : 0.4;
+      this.indicator.power = m.draw;
+    }
+    this.rebuildSwitcher();
+  }
+
+  /** Fighter and platform nodes for the model's current bodies. */
+  private syncWorld(): void {
+    const m = this.model;
     const alive = new Set<Fighter>(m.fighters);
     for (const [f, n] of this.fighterNodes) {
       if (!alive.has(f)) {
@@ -359,22 +378,6 @@ export class PlayScene extends Scene {
     for (const p of m.platforms) {
       if (!this.platformNodes.has(p)) this.platformNodes.set(p, this.platformLayer.add(new PlatformNode(p, { id: p.kind === 'tower' ? 'tower' : '' })));
     }
-
-    this.hpBar.setValue(m.hp, m.maxHp);
-    this.staminaBar.setValue(m.stamina, m.maxStamina);
-    this.staminaBar.low = m.state === 'playing' && m.stamina < SHOT_COST;
-
-    const drawing = m.drawing && this.aiming;
-    this.preview.visible = drawing;
-    if (drawing) {
-      const angle = m.player.aimAngle;
-      this.preview.angle = angle;
-      this.preview.speed = launchSpeed(Math.max(0.2, m.draw));
-      this.preview.origin = m.muzzle(m.player, angle);
-      this.preview.strength = m.draw >= 0.2 ? 1 : 0.4;
-      this.indicator.power = m.draw;
-    }
-    this.rebuildSwitcher();
   }
 
   // ---------------------------------------------------------------- events

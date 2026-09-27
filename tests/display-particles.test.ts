@@ -211,7 +211,7 @@ describe('ParticleEmitter', () => {
       e.destroy();
     }
     console.log(`[perf] 1000 particles, 30 drawn + 120 updated frames, headless 780x1688 canvas\n  ${results.join('\n  ')}`);
-  }, 20_000);
+  });
 });
 
 describe('sandbox display scenes', () => {

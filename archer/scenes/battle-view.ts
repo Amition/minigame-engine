@@ -1,4 +1,4 @@
-import { Node, Text, type Ctx2D, type NodeOptions } from '@engine';
+import { ballisticPosition, Node, Text, type Ctx2D, type NodeOptions } from '@engine';
 import { drawApple, drawArrow, drawBackdrop, drawExplosion, drawFighter, drawLightning, drawPlatform } from '../art/index';
 import { COLORS } from '../config';
 import { ARROW_GRAVITY } from '../model';
@@ -52,21 +52,46 @@ export class FighterNode extends Node {
   }
 }
 
-/** Tower or floating block with the arrows stuck in it. */
+/**
+ * Tower or floating block with the arrows stuck in it. Its box is the platform's rectangle (centre anchor, rotated)
+ * and follows it every frame, so HUD can track it with followNode / pinToNode.
+ */
 export class PlatformNode extends Node {
   constructor(
     readonly view: PlatformView,
     opts?: NodeOptions,
   ) {
-    super(opts);
+    super();
+    this.anchorX = this.anchorY = 0.5;
+    this.fit();
+    if (opts) this.set(opts);
   }
 
   override get kind(): string {
     return 'Platform';
   }
 
+  override update(): void {
+    this.fit();
+  }
+
+  private fit(): void {
+    const p = this.view;
+    this.x = p.x;
+    this.y = p.y;
+    this.width = p.w;
+    this.height = p.h;
+    this.rotation = p.angle;
+  }
+
   override draw(ctx: Ctx2D): void {
+    // drawPlatform paints in field units: undo this node's own transform
+    ctx.save();
+    ctx.translate(this.width / 2, this.height / 2);
+    ctx.rotate(-this.rotation);
+    ctx.translate(-this.x, -this.y);
     drawPlatform(ctx, this.view);
+    ctx.restore();
   }
 
   override describe() {
@@ -191,6 +216,8 @@ export class LightningNode extends Node {
 }
 
 /** Dotted preview of the first moments of the arrow's flight from the bow (world units). */
+const dot: Vec = { x: 0, y: 0 };
+
 export class TrajectoryPreview extends Node {
   origin: Vec = { x: 0, y: 0 };
   angle = 0;
@@ -210,12 +237,10 @@ export class TrajectoryPreview extends Node {
     const n = 9;
     ctx.fillStyle = '#ffffff';
     for (let i = 1; i <= n; i++) {
-      const t = (i / n) * this.span;
-      const x = this.origin.x + vx * t;
-      const y = this.origin.y + vy * t + 0.5 * ARROW_GRAVITY * t * t;
+      const p = ballisticPosition(this.origin.x, this.origin.y, vx, vy, ARROW_GRAVITY, (i / n) * this.span, dot);
       ctx.globalAlpha = this.strength * (1 - i / (n + 2)) * 0.9;
       ctx.beginPath();
-      ctx.arc(x, y, 4.5 - i * 0.25, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 4.5 - i * 0.25, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;

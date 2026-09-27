@@ -2,3 +2,4 @@
 export * from './headless';
 export * from './devices';
 export * from './harness';
+export * from './sweep';

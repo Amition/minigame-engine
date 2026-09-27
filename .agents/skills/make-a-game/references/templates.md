@@ -120,7 +120,7 @@ const shots = !!process.env.GAME_SHOTS;
 
 describe('play', () => {
   it('scores when tapped and ends the game', async () => {
-    t = await createTestGame({ app, device: 'iphone-14', scene: 'play', params: { seed: 3 } });
+    t = await createTestGame({ app, device: 'iphone-14', scene: 'play', params: { seed: 3 }, render: 'none' });
     const scene = t.scene as PlayScene;
     for (let i = 0; i < 12 && scene.model.state === 'playing'; i++) {
       await t.tap('#touch-zone');
@@ -129,18 +129,18 @@ describe('play', () => {
     if (shots) await t.screenshot('.shots/game-play-iphone-14.png');
     expect(scene.model.state).toBe('over');
     expect(t.played()).toContain('score');
-  }, 30_000);
+  });
 
   it('lints clean on three devices', async () => {
     for (const device of ['iphone-se', 'iphone-14', 'ipad']) {
-      t = await createTestGame({ app, device, scene: 'play', params: { seed: 1 } });
+      t = await createTestGame({ app, device, scene: 'play', params: { seed: 1 }, render: 'none' });
       await t.advance(0.5);
       const issues = lintUI(t.game.stage, t.game);
       expect(issues.filter((i) => i.severity === 'error'), `${device}\n${formatLint(issues)}`).toHaveLength(0);
       t.destroy();
       t = null;
     }
-  }, 30_000);
+  });
 });
 ```
 

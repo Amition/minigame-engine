@@ -19,7 +19,7 @@ import { archerSave, currentStats, loadout, trials } from './save';
 
 let t: TestGame | null = null;
 beforeEach(async () => {
-  t = await createTestGame();
+  t = await createTestGame({ render: 'none', pixelRatio: 1 });
   trials.clear();
 });
 afterEach(() => {

@@ -1,5 +1,22 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { Box, createSave, darkUITheme, lightUITheme, mountScreen, Node, onAim, setUITheme, ui, uiTheme, type AimInfo, type Ctx2D } from '@engine';
+import {
+  Box,
+  createAudioManager,
+  createSave,
+  darkUITheme,
+  defineSong,
+  lightUITheme,
+  mountScreen,
+  Node,
+  onAim,
+  setUITheme,
+  sfxPresets,
+  ui,
+  uiTheme,
+  type AimInfo,
+  type AudioLibrary,
+  type Ctx2D,
+} from '@engine';
 import { createTestGame, type TestGame, type TestRenderMode } from '@engine/testing';
 
 let t: TestGame | null = null;
@@ -153,5 +170,27 @@ describe('createTestGame isolation', () => {
     setUITheme(lightUITheme);
     t = await createTestGame();
     expect(uiTheme()).toBe(darkUITheme);
+  });
+
+  it('later test games reuse the sounds an earlier one synthesized (same PCM, same info)', async () => {
+    const library: AudioLibrary = {
+      sfx: { coin: sfxPresets.coin() },
+      music: { loop: defineSong({ bpm: 240, tracks: { l: { instrument: 'triangle', notes: 'C4 E4 G4 C5 |' } } }) },
+    };
+    const boot = async () => {
+      t = await createTestGame();
+      const audio = createAudioManager(t.game, { library });
+      await audio.preload();
+      const pcm = (k: string) => t!.platform.audio.pcm.get(k)!;
+      return { coin: pcm('coin'), loop: pcm('loop'), info: audio.info('loop') };
+    };
+    const first = await boot();
+    t!.destroy();
+    const second = await boot();
+    expect(second.coin.data).toBe(first.coin.data);
+    expect(second.loop.data).toBe(first.loop.data);
+    expect(second.loop.sampleRate).toBe(22050);
+    expect(second.info).toEqual(first.info);
+    expect(second.info?.source).toBe('synth');
   });
 });

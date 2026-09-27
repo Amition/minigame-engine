@@ -1,4 +1,4 @@
-import { Rng } from '@engine';
+import { ballisticAngle, boxToLocal, boxToWorld, Rng, sweepSegmentBox, sweepSegmentCircle } from '@engine';
 import {
   APPLES,
   appleDef,
@@ -13,7 +13,7 @@ import {
   type PlayerStats,
 } from './config';
 import { MENU_ENEMY_TOP, MENU_ENEMY_X, TOWER_TOP, TOWER_X } from './layout';
-import { fromPlatform, GRAVITY, Ragdoll, segCircle, segRect, toPlatform, type BodyHit } from './ragdoll';
+import { GRAVITY, Ragdoll, type BodyHit } from './ragdoll';
 import {
   BODY,
   J,
@@ -170,15 +170,7 @@ export function enemyFor(index: number): EnemySpec {
  * higher one with `high`. Null when the target is out of range.
  */
 export function solveLaunchAngle(dx: number, dy: number, v: number, g = ARROW_GRAVITY, high = false): number | null {
-  const x = Math.abs(dx);
-  const y = -dy;
-  if (x < 1e-6) return dy < 0 ? -Math.PI / 2 : Math.PI / 2;
-  const v2 = v * v;
-  const disc = v2 * v2 - g * (g * x * x + 2 * y * v2);
-  if (disc < 0) return null;
-  const root = Math.sqrt(disc);
-  const up = Math.atan((v2 + (high ? root : -root)) / (g * x));
-  return dx >= 0 ? -up : Math.PI + up;
+  return ballisticAngle(dx, dy, v, g, high);
 }
 
 // ---------------------------------------------------------------- events
@@ -1183,7 +1175,7 @@ export class BattleModel {
   private collideArrow(a: Arrow, x0: number, y0: number, x1: number, y1: number): boolean {
     if (a.who !== null) {
       for (const ap of this.apples) {
-        if (segCircle(x0, y0, x1 - x0, y1 - y0, ap.x, ap.y, ap.r + 4) !== null) this.burstApple(ap, a.who);
+        if (sweepSegmentCircle(x0, y0, x1, y1, ap.x, ap.y, ap.r + 4) !== null) this.burstApple(ap, a.who);
       }
     }
     let bestT = Infinity;
@@ -1201,7 +1193,7 @@ export class BattleModel {
     }
     for (const pl of this.platforms) {
       if (pl.removed) continue;
-      const t = segRect(x0, y0, x1, y1, pl);
+      const t = sweepSegmentBox(x0, y0, x1, y1, pl);
       if (t !== null && t < bestT) {
         bestT = t;
         bestPlatform = pl;
@@ -1364,7 +1356,7 @@ export class BattleModel {
       return;
     }
     const angle = a.flightAngle;
-    const tip = toPlatform(pl, a.x + Math.cos(angle) * 10, a.y + Math.sin(angle) * 10);
+    const tip = boxToLocal(pl, a.x + Math.cos(angle) * 10, a.y + Math.sin(angle) * 10);
     pl.pins.push({ lx: tip.x, ly: tip.y, rel: angle - pl.angle });
     pl.stuck.push({ type: a.type, x: 0, y: 0, angle });
     if (pl.pins.length > MAX_STUCK_PLATFORM) {
@@ -1405,10 +1397,8 @@ export class BattleModel {
   private syncPlatformStuck(pl: Platform): void {
     for (let i = 0; i < pl.pins.length; i++) {
       const pin = pl.pins[i]!;
-      const w = fromPlatform(pl, pin.lx, pin.ly);
       const st = pl.stuck[i]!;
-      st.x = w.x;
-      st.y = w.y;
+      boxToWorld(pl, pin.lx, pin.ly, st);
       st.angle = pl.angle + pin.rel;
     }
   }

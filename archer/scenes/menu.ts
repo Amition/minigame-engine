@@ -1,10 +1,9 @@
 import {
-  bakeTexture,
   canShowAd,
   isAudioMuted,
   mountScreen,
   Node,
-  parseColor,
+  nodeRect,
   playSound,
   punch,
   setAudioMuted,
@@ -13,7 +12,6 @@ import {
   showModal,
   showRewardedAd,
   showToast,
-  textures,
   toastHost,
   tween,
   ui,
@@ -26,7 +24,6 @@ import {
   type Modal,
   type Rect,
   type Scene,
-  type Texture,
   type UIChild,
   type UIIcon,
   type UIToastVariant,
@@ -34,7 +31,7 @@ import {
 } from '@engine';
 import { ART_KEYS } from '../art/index';
 import { AD_SKULLS, ARROWS, arrowDef, COLORS, UPGRADES, upgradeBonusText, type ArrowDef, type ArrowId, type LabelColor, type UpgradeId } from '../config';
-import { MENU_ENEMY_TOP, MENU_ENEMY_X, screenLayout, TOWER_TOP, TOWER_X } from '../layout';
+import { fieldNode, MENU_ENEMY_AREA, MENU_PLAYER_AREA, screenLayout, type ScreenLayout } from '../layout';
 import {
   buyUpgrade,
   equippedArrows,
@@ -131,10 +128,9 @@ export interface MenuGeometry {
 
 /** Where each menu part goes for a view / safe area, the play scene's zone and its HUD bottom. */
 export function menuGeometry(view: { width: number; height: number }, safe: Rect, zone: Rect, hudBottom: number): MenuGeometry {
-  const { field } = screenLayout(view, safe);
-  const s = field.scale;
-  const enemy = { x: field.x + (MENU_ENEMY_X - 100) * s, y: field.y + (MENU_ENEMY_TOP - 240) * s, w: 200 * s, h: 380 * s };
-  const player = { x: field.x + (TOWER_X - 60) * s, y: field.y + (TOWER_TOP - 220) * s, w: 150 * s, h: 220 * s };
+  const world = fieldNode(screenLayout(view, safe).field);
+  const enemy = nodeRect(world, MENU_ENEMY_AREA);
+  const player = nodeRect(world, MENU_PLAYER_AREA);
   const zoneRight = zone.x + zone.w;
   const left = Math.max(zone.x, safe.x) + 16;
   const safeBottom = safe.y + safe.h;
@@ -160,6 +156,17 @@ export function menuGeometry(view: { width: number; height: number }, safe: Rect
   };
 }
 
+/**
+ * The world areas the menu must not paint over (idle enemy, player on the tower) as `lint-keep-clear` nodes in
+ * field units, so `lintUI` / `pnpm shot --lint` report menu UI covering them (rule covers-keep-clear).
+ */
+function keepClearAreas(field: ScreenLayout['field']): Node {
+  const world = fieldNode(field, { id: 'menu-keep-clear', tags: ['lint-ignore'] });
+  const area = (id: string, r: Rect) => new Node({ id, tags: ['lint-keep-clear'], x: r.x, y: r.y, width: r.w, height: r.h });
+  world.append(area('keep-clear-enemy', MENU_ENEMY_AREA), area('keep-clear-player', MENU_PLAYER_AREA));
+  return world;
+}
+
 // ---------------------------------------------------------------- look
 
 const LABEL_COLORS: Record<LabelColor, string> = { red: COLORS.labelRed, blue: COLORS.labelBlue, orange: COLORS.labelOrange };
@@ -169,44 +176,12 @@ const MAXED_FILL = '#c4c4c9';
 const PRIMARY_FACE = '#ffb627';
 const PRIMARY_INK = '#4a2500';
 
-const inked = new Map<string, { src: Texture; tex: Texture }>();
-
 /**
- * The art icons are white on transparent; light buttons need them dark. Maps brightness per pixel (white -> ink,
- * black -> paper) so painted details such as eye sockets survive. Falls back to the key while the art is missing.
+ * The art icons are white on transparent; light buttons need them dark. `duotone: [paper, ink]` maps brightness per
+ * pixel (black -> paper, white -> ink) so painted details such as eye sockets survive.
  */
-function inkIcon(key: string, ink: string = COLORS.buttonText, paper: string = COLORS.button): Texture | string {
-  const src = textures.tryGet(key);
-  if (!src) return key;
-  const id = `${key}~${ink}~${paper}`;
-  const hit = inked.get(id);
-  if (hit && hit.src === src) return hit.tex;
-  const res = 2;
-  const w = src.width;
-  const h = src.height;
-  const a = parseColor(ink);
-  const b = parseColor(paper);
-  const tex = bakeTexture(
-    w,
-    h,
-    (ctx) => {
-      src.draw(ctx, 0, 0, w, h);
-      const img = ctx.getImageData(0, 0, Math.ceil(w * res), Math.ceil(h * res));
-      const d = img.data;
-      for (let i = 0; i < d.length; i += 4) {
-        if (d[i + 3] === 0) continue;
-        const l = (0.299 * d[i]! + 0.587 * d[i + 1]! + 0.114 * d[i + 2]!) / 255;
-        d[i] = b.r + (a.r - b.r) * l;
-        d[i + 1] = b.g + (a.g - b.g) * l;
-        d[i + 2] = b.b + (a.b - b.b) * l;
-      }
-      ctx.putImageData(img, 0, 0);
-    },
-    { resolution: res, key: id },
-  );
-  inked.set(id, { src, tex });
-  return tex;
-}
+const INK_ON_BUTTON: [string, string] = [COLORS.button, COLORS.buttonText];
+const INK_ON_LOCKED: [string, string] = [COLORS.cardLocked, COLORS.buttonText];
 
 /** Flat rounded button (the original's light grey keys): press dip, hit area padded to 88. */
 class FlatButton extends UIView {
@@ -383,6 +358,7 @@ class ArcherMenu implements MenuHandle {
     const game = (this.game = scene.game);
     this.root = scene.add(new Node({ id: 'menu', width: scene.width, height: scene.height }));
     const g = menuGeometry(game.view, game.safe, opts.zone, opts.hudBottom);
+    this.root.add(keepClearAreas(screenLayout(game.view, game.safe).field));
     mountScreen(this.root, ui.view({ kind: 'MenuLayer' }, [...this.buildZone(g), this.buildRows(g), ...this.buildList(g), this.buildCluster(g)]), {
       area: 'view',
     });
@@ -396,7 +372,7 @@ class ArcherMenu implements MenuHandle {
 
   private buildZone(g: MenuGeometry): UIChild[] {
     const abs = (r: Rect) => ({ position: 'absolute' as const, left: r.x, top: r.y, width: r.w });
-    const panel = ui.view({ kind: 'ZonePanel', id: 'menu-zone', ...abs(g.panel), height: g.panel.h, fill: 'rgba(0,0,0,0.2)', radius: 28 });
+    const panel = ui.view({ kind: 'ZonePanel', id: 'menu-zone', ...abs(g.panel), height: g.panel.h, fill: 'rgba(0,0,0,0.2)', radius: 28, lintRole: 'decor' });
     this.ad = flatButton(
       { id: 'menu-ad', position: 'absolute', left: g.ad.x, top: g.ad.y, height: 48, padding: [0, 16], gap: 8, fill: 'rgba(0,0,0,0.32)', radius: 'full' },
       [ui.icon(ART_KEYS.film, { size: 36, shrink: 0 }), ui.text(`+${AD_SKULLS}`, { size: 30, weight: 'bold', color: COLORS.labelOrange })],
@@ -420,7 +396,7 @@ class ArcherMenu implements MenuHandle {
     const col = ui.column({ kind: 'UpgradeRows', id: 'menu-upgrades', position: 'absolute', left: g.rows.x, top: g.rows.y, width: g.rows.w, height: g.rows.h });
     for (const u of UPGRADES) {
       const color = LABEL_COLORS[u.color];
-      const skull = ui.icon(inkIcon(ART_KEYS.skull), { size: 30, shrink: 0 });
+      const skull = ui.icon(ART_KEYS.skull, { size: 30, shrink: 0, duotone: INK_ON_BUTTON });
       const price = ui.text('', { id: `price-${u.id}`, size: 26, weight: 'bold', color: COLORS.buttonText, autoFit: 20 });
       const btn = flatButton({ id: `buy-${u.id}`, width: PRICE_W, height: PRICE_H, gap: 4, padding: [0, 8] }, [skull, price], () => this.buy(u.id));
       const bonus = ui.text('+0', { id: `bonus-${u.id}`, size: 26, color });
@@ -457,7 +433,7 @@ class ArcherMenu implements MenuHandle {
       flatButton({ id: 'menu-duo', position: 'absolute', left: 0, top: 0, width: DUO_W, height: BTN_H }, [ui.text('双人', { size: 28, color: COLORS.buttonText })], () =>
         this.openDuo(),
       ),
-      flatButton({ id: 'menu-settings', position: 'absolute', left: 0, top, width: BTN_H, height: BTN_H }, [ui.icon(inkIcon(ART_KEYS.gear), { size: 40 })], () =>
+      flatButton({ id: 'menu-settings', position: 'absolute', left: 0, top, width: BTN_H, height: BTN_H }, [ui.icon(ART_KEYS.gear, { size: 40, duotone: INK_ON_BUTTON })], () =>
         this.openSettings(),
       ),
       flatButton(
@@ -500,9 +476,9 @@ class ArcherMenu implements MenuHandle {
     else if (!owned && a.trial) lead.push(ui.icon(ART_KEYS.film, { size: 40, shrink: 0 }));
     else if (!owned) {
       lead.push(
-        ui.icon(inkIcon(ART_KEYS.lock, COLORS.buttonText, COLORS.cardLocked), { size: 30, shrink: 0 }),
+        ui.icon(ART_KEYS.lock, { size: 30, shrink: 0, duotone: INK_ON_LOCKED }),
         ui.row({ gap: 2, shrink: 0 }, [
-          ui.icon(inkIcon(ART_KEYS.skull, COLORS.buttonText, COLORS.cardLocked), { size: 22 }),
+          ui.icon(ART_KEYS.skull, { size: 22, duotone: INK_ON_LOCKED }),
           ui.text(String(a.cost), { size: 22, weight: 'bold', color: COLORS.buttonText }),
         ]),
       );
@@ -618,7 +594,7 @@ class ArcherMenu implements MenuHandle {
     ]);
     const priceInk = { size: 32, weight: 'bold' as const, color: PRIMARY_INK };
     dialog.buttons[0]!.add(
-      ui.row({ gap: 2 }, [ui.text('(', priceInk), ui.icon(inkIcon(ART_KEYS.skull, PRIMARY_INK, PRIMARY_FACE), { size: 34 }), ui.text(`${a.cost})`, priceInk)]),
+      ui.row({ gap: 2 }, [ui.text('(', priceInk), ui.icon(ART_KEYS.skull, { size: 34, duotone: [PRIMARY_FACE, PRIMARY_INK] }), ui.text(`${a.cost})`, priceInk)]),
     );
     this.track(dialog);
     void dialog.closed.then((r) => {

@@ -107,6 +107,26 @@ interface AudioSettings {
 
 const managers = new WeakMap<Game, AudioManager>();
 
+interface Synthesized {
+  pcm: Float32Array;
+  sampleRate: number;
+  info: SoundInfo;
+}
+
+/**
+ * Fallback synthesis per definition object and sample rate. Rendering is deterministic (seeded), so managers share it:
+ * tests create a manager per test game and would otherwise re-render every song for seconds each time.
+ */
+const synthCache = new WeakMap<object, Map<number, Synthesized>>();
+
+function synthesizeOnce(def: object, sampleRate: number, render: () => Synthesized): Synthesized {
+  let bySampleRate = synthCache.get(def);
+  if (!bySampleRate) synthCache.set(def, (bySampleRate = new Map()));
+  let s = bySampleRate.get(sampleRate);
+  if (!s) bySampleRate.set(sampleRate, (s = render()));
+  return s;
+}
+
 /**
  * Game audio on top of the platform AudioBackend: manifest loading, sfx with cooldowns and voice limits, looping
  * music with cross-fades, master/music/sfx volumes and mutes (persisted), hide/show handling and a synth fallback.
@@ -246,29 +266,33 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
     const loadPcm = this.backend.loadPcm?.bind(this.backend);
     if (!loadPcm) return false;
     const sfx = this.library.sfx?.[name];
+    const song = sfx ? undefined : this.library.music?.[name];
+    let s: Synthesized;
     if (sfx) {
       const params = typeof sfx === 'function' ? sfx() : sfx;
-      const sr = 44100;
-      const pcm = renderSfx(params, sr);
-      await loadPcm(name, pcm, sr);
-      this.infos.set(name, { duration: pcm.length / sr, source: 'synth' });
-      return true;
-    }
-    const song = this.library.music?.[name];
-    if (song) {
-      const sr = this.opts.fallbackMusicRate;
-      const r = renderSong(song, { sampleRate: sr });
-      const pcm = new Float32Array(r.left.length);
-      for (let i = 0; i < pcm.length; i++) pcm[i] = (r.left[i]! + r.right[i]!) * 0.5;
-      await loadPcm(name, pcm, sr);
-      this.infos.set(name, {
-        duration: r.duration,
-        ...(r.loopStart !== undefined ? { loopStart: r.loopStart, loopEnd: r.loopEnd! } : {}),
-        source: 'synth',
+      s = synthesizeOnce(params, 44100, () => {
+        const pcm = renderSfx(params, 44100);
+        return { pcm, sampleRate: 44100, info: { duration: pcm.length / 44100, source: 'synth' } };
       });
-      return true;
+    } else if (song) {
+      s = synthesizeOnce(song, this.opts.fallbackMusicRate, () => {
+        const sr = this.opts.fallbackMusicRate;
+        const r = renderSong(song, { sampleRate: sr });
+        const pcm = new Float32Array(r.left.length);
+        for (let i = 0; i < pcm.length; i++) pcm[i] = (r.left[i]! + r.right[i]!) * 0.5;
+        const info: SoundInfo = {
+          duration: r.duration,
+          ...(r.loopStart !== undefined ? { loopStart: r.loopStart, loopEnd: r.loopEnd! } : {}),
+          source: 'synth',
+        };
+        return { pcm, sampleRate: sr, info };
+      });
+    } else {
+      return false;
     }
-    return false;
+    await loadPcm(name, s.pcm, s.sampleRate);
+    this.infos.set(name, { ...s.info });
+    return true;
   }
 
   // ---------------------------------------------------------------- volumes

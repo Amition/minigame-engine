@@ -120,5 +120,5 @@ describe('archer audio contract', () => {
     expect(a.rmsDb).toBeLessThanOrEqual(-22);
     expect(a.seamJump!).toBeLessThan(0.05);
     expect(a.verdict).toBe('ok');
-  }, 30_000);
+  });
 });

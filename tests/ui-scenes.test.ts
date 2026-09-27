@@ -61,13 +61,13 @@ describe('ui demo scenes are lint-clean', () => {
   for (const c of CASES) {
     for (const device of DEVICES) {
       it(`${c.name} on ${device}`, async () => {
-        t = await createTestGame({ app: sandbox as AppDef, device, scene: c.scene, ...(c.params ? { params: c.params } : {}) });
+        t = await createTestGame({ app: sandbox as AppDef, device, scene: c.scene, render: 'none', ...(c.params ? { params: c.params } : {}) });
         await t.advance(1.5);
         const issues = await lintAllPages(t, `${c.name}-${device}`);
         if (process.env.UI_LINT_VERBOSE && issues.length) console.log(`${c.name} ${device}\n${formatLint(issues)}`);
         const errors = issues.filter((i) => i.severity === 'error');
         expect(formatLint(errors)).toBe('UI lint: no issues');
-      }, 30000);
+      });
     }
   }
 });

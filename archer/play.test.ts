@@ -17,7 +17,7 @@ const shots = !!process.env.GAME_SHOTS;
 const DEVICES = ['iphone-se-land', 'iphone-14-land', 'ipad-land'];
 
 async function play(device: string, seed: number): Promise<{ t: TestGame; scene: PlayScene }> {
-  t = await createTestGame({ app, device, scene: 'play', params: { seed } });
+  t = await createTestGame({ app, device, scene: 'play', params: { seed }, render: 'none' });
   return { t, scene: t.scene as PlayScene };
 }
 
@@ -80,7 +80,7 @@ describe('archer play scene', () => {
     expect(t.find('#menu')).toBeNull();
     expect(t.get('#pause').visible).toBe(true);
     expect(t.played()).toEqual(expect.arrayContaining(['draw', 'shoot']));
-  }, 30_000);
+  });
 
   it('a bot aiming with the model helper kills enemies; skulls land in the save and the counter', async () => {
     const { t, scene } = await play('iphone-14-land', 3);
@@ -113,7 +113,7 @@ describe('archer play scene', () => {
     expect(t.get<Label>('#score').text).toBe(`得分 ${m.score}/${m.score}`);
     expect(t.played()).toEqual(expect.arrayContaining(['hit', 'kill', 'coin']));
     if (shots) await t.screenshot('.shots/archer-play-kills.png');
-  }, 60_000);
+  });
 
   it('an idle player dies: game over dialog, then 返回 goes back to the menu', async () => {
     const { t, scene } = await play('iphone-14-land', 5);
@@ -140,7 +140,7 @@ describe('archer play scene', () => {
     expect(t.find('#menu')).not.toBeNull();
     expect(archerSave().data.games).toBe(1);
     expect(archerSave().data.runs).toHaveLength(1);
-  }, 90_000);
+  });
 
   it('the rewarded ad revives once; 放弃本局 in the pause modal ends the run without another offer', async () => {
     const { t, scene } = await play('iphone-14-land', 2);
@@ -182,7 +182,7 @@ describe('archer play scene', () => {
     await t.advance(1);
     expect((t.scene as PlayScene).model.state).toBe('menu');
     expect(archerSave().data.games).toBe(1);
-  }, 30_000);
+  });
 
   it('switches arrows by button and keys; Space jumps', async () => {
     const { t } = await play('iphone-14-land', 4);
@@ -211,7 +211,29 @@ describe('archer play scene', () => {
     await t.advance(1.5);
     expect(m.player.body.grounded).toBe(true);
     expect(t.played()).toEqual(expect.arrayContaining(['equip', 'jump']));
-  }, 30_000);
+  });
+
+  it('the tower HUD rides the tower face, also after a resize', async () => {
+    const { t } = await play('iphone-se-land', 1);
+    await t.advance(0.3);
+    const expectOnTower = (label: string) => {
+      const tower = t.get('#tower').worldBounds();
+      const safe = t.game.safe;
+      for (const sel of ['#hp-bar', '#stamina-bar', '#jump']) {
+        const b = t.get(sel).worldBounds();
+        expect(b.x, `${label} ${sel}`).toBeGreaterThanOrEqual(tower.x);
+        expect(b.x + b.w, `${label} ${sel}`).toBeLessThanOrEqual(tower.x + tower.w);
+        expect(b.y, `${label} ${sel}`).toBeGreaterThan(tower.y + 10);
+        expect(b.y + b.h, `${label} ${sel}`).toBeLessThanOrEqual(safe.y + safe.h);
+      }
+    };
+    expectOnTower('phone');
+    const before = t.get('#tower').worldBounds();
+    t.platform.resize(1024, 768);
+    await t.step(1);
+    expect(t.get('#tower').worldBounds().y).toBeGreaterThan(before.y + 50);
+    expectOnTower('tablet');
+  });
 
   it('lints clean on three landscape devices: menu, battle HUD, pause modal, game over dialog', async () => {
     for (const device of DEVICES) {
@@ -260,5 +282,5 @@ describe('archer play scene', () => {
       t.destroy();
     }
     t = null;
-  }, 60_000);
+  });
 });

@@ -22,7 +22,7 @@ const shots = !!process.env.GAME_SHOTS;
 const DEVICES = ['iphone-se-land', 'iphone-14-land', 'ipad-land'];
 
 async function duo(device: string, params: DuoParams): Promise<{ t: TestGame; scene: DuoScene }> {
-  t = await createTestGame({ app, device, scene: 'duo', params });
+  t = await createTestGame({ app, device, scene: 'duo', params, render: 'none' });
   return { t, scene: t.scene as DuoScene };
 }
 
@@ -88,7 +88,7 @@ const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y
 
 describe('archer two-player modes', () => {
   it('menu → 双人 → 对战: concurrent drags shoot both archers; rounds and the match end; 返回 goes back to the menu', async () => {
-    t = await createTestGame({ app, device: 'iphone-se-land', scene: 'play', params: { seed: 1 } });
+    t = await createTestGame({ app, device: 'iphone-se-land', scene: 'play', params: { seed: 1 }, render: 'none' });
     await t.advance(0.5);
     await t.tap('#menu-duo');
     await t.advance(0.4);
@@ -153,7 +153,7 @@ describe('archer two-player modes', () => {
     expect(menu.model.state).toBe('menu');
     expect(t.find('#menu')).not.toBeNull();
     expect(openModalsOf()).toHaveLength(0);
-  }, 120_000);
+  });
 
   it('co-op: both archers shoot the enemy series together, skulls are banked, game over when both are out', async () => {
     const { t, scene } = await duo('iphone-14-land', { mode: 'coop', seed: 3 });
@@ -207,7 +207,7 @@ describe('archer two-player modes', () => {
     expect(next.mode).toBe('coop');
     expect(next.model.state).toBe('playing');
     expect(openModalsOf()).toHaveLength(0);
-  }, 180_000);
+  });
 
   it('each player has an arrow switch and a jump button (and keys); pause freezes, 返回菜单 leaves', async () => {
     const { t } = await duo('iphone-se-land', { mode: 'versus', seed: 4 });
@@ -257,11 +257,11 @@ describe('archer two-player modes', () => {
     expect((t.scene as PlayScene).kind).toBe('PlayScene');
     expect(t.find('#menu')).not.toBeNull();
     expect(openModalsOf()).toHaveLength(0);
-  }, 30_000);
+  });
 
   it('the 双人 button sits in the bottom cluster, clear of the zone and the idle enemy; its dialog lints clean', async () => {
     for (const device of DEVICES) {
-      t = await createTestGame({ app, device, scene: 'menu-preview', pixelRatio: 1 });
+      t = await createTestGame({ app, device, scene: 'menu-preview', render: 'none', pixelRatio: 1 });
       await t.advance(0.3);
       const g = t.game;
       const lay = screenLayout(g.view, g.safe);
@@ -286,7 +286,7 @@ describe('archer two-player modes', () => {
       t.destroy();
       t = null;
     }
-  }, 30_000);
+  });
 
   it('lints clean on three landscape devices: versus / co-op HUD, pause modal, end dialogs', async () => {
     for (const device of DEVICES) {
@@ -335,5 +335,5 @@ describe('archer two-player modes', () => {
       t.destroy();
     }
     t = null;
-  }, 90_000);
+  });
 });

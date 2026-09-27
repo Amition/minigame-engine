@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { formatLint, isAudioMuted, lintUI, openModalsOf, type Node, type Rect, type ScrollView } from '@engine';
+import {
+  convertPoint,
+  formatLint,
+  isAudioMuted,
+  keepClearZones,
+  lintUI,
+  openModalsOf,
+  setUILayout,
+  type Node,
+  type Rect,
+  type ScrollView,
+} from '@engine';
 import { createTestGame, type TestGame } from '@engine/testing';
 import { AD_SKULLS, arrowDef, NO_UPGRADES, START_SKULLS, upgradeCost } from './config';
 import { screenLayout } from './layout';
@@ -20,7 +31,7 @@ afterEach(() => {
 });
 
 async function open(device: string = 'iphone-se-land', params?: MenuPreviewParams): Promise<{ t: TestGame; scene: MenuPreviewScene }> {
-  t = await createTestGame({ app, device, scene: 'menu-preview', params, pixelRatio: 1 });
+  t = await createTestGame({ app, device, scene: 'menu-preview', params, render: 'none', pixelRatio: 1 });
   await t.advance(0.3);
   return { t, scene: t.scene as MenuPreviewScene };
 }
@@ -35,7 +46,8 @@ function expectClean(game: TestGame, label: string): void {
 const text = (tg: TestGame, sel: string) => String(tg.get(sel).describe().text ?? '');
 const toasts = (tg: TestGame) => tg.findAll('Toast').map((n) => String(n.describe().text));
 const inside = (r: Rect, x: number, y: number) => x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h;
-const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+const offBy = (a: Rect, b: Rect) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.w - b.w), Math.abs(a.h - b.h));
+const covers = (tg: TestGame) => lintUI(tg.game.stage, tg.game).filter((i) => i.rule === 'covers-keep-clear');
 const hitRect = (n: Node): Rect => {
   const b = n.worldBounds();
   const p = n.hitPadding;
@@ -67,7 +79,7 @@ describe('start menu layout', () => {
         t = null;
       }
     }
-  }, 90_000);
+  });
 
   it('keeps the idle enemy, the score band and the zone free on every device', async () => {
     for (const device of DEVICES) {
@@ -76,9 +88,14 @@ describe('start menu layout', () => {
       const lay = screenLayout(g.view, g.safe);
       const geo = menuGeometry(g.view, g.safe, lay.zone, lay.hudBottom);
       const zoneRight = lay.zone.x + lay.zone.w;
+      const zones = keepClearZones(g.stage, g);
+      expect(zones.map((z) => z.name).sort(), device).toEqual(['Node#keep-clear-enemy', 'Node#keep-clear-player']);
+      expect(offBy(zones.find((z) => z.node?.id === 'keep-clear-enemy')!.rect, geo.enemy), device).toBeLessThan(0.01);
+      expect(offBy(zones.find((z) => z.node?.id === 'keep-clear-player')!.rect, geo.player), device).toBeLessThan(0.01);
+      const hits = covers(tg);
+      expect(hits, `${device}\n${formatLint(hits)}`).toHaveLength(0);
       for (const sel of ['#menu-upgrades', '#arrow-list', '#slots-header', '#menu-settings', '#menu-leaderboard']) {
         const b = tg.get(sel).worldBounds();
-        expect(overlaps(b, geo.enemy), `${device} ${sel} covers the enemy`).toBe(false);
         expect(b.x, `${device} ${sel} in the zone`).toBeGreaterThanOrEqual(zoneRight);
         expect(b.x + b.w, `${device} ${sel} off the safe area`).toBeLessThanOrEqual(g.safe.x + g.safe.w);
         expect(b.y + b.h, `${device} ${sel} off the safe area`).toBeLessThanOrEqual(g.safe.y + g.safe.h);
@@ -98,7 +115,23 @@ describe('start menu layout', () => {
       tg.destroy();
       t = null;
     }
-  }, 30_000);
+  });
+
+  it('a menu button moved onto the idle enemy is a covers-keep-clear error', async () => {
+    const { t: tg } = await open();
+    const g = tg.game;
+    const lay = screenLayout(g.view, g.safe);
+    const { enemy } = menuGeometry(g.view, g.safe, lay.zone, lay.hudBottom);
+    const btn = tg.get('#menu-settings');
+    const p = convertPoint(null, btn.parent, enemy.x + (enemy.w - btn.width) / 2, enemy.y + (enemy.h - btn.height) / 2);
+    setUILayout(btn, { left: p.x, top: p.y });
+    await tg.step(1);
+    const c = btn.worldCenter();
+    expect(inside(enemy, c.x, c.y)).toBe(true);
+    const hits = covers(tg);
+    expect(hits.map((i) => `${i.severity} ${i.node.id} ${i.other?.id}`)).toEqual(['error menu-settings keep-clear-enemy']);
+    expect(formatLint(hits)).toMatch(/covers keep-clear Node#keep-clear-enemy/);
+  });
 
   it('taps inside the zone (away from +100) hit no menu node', async () => {
     for (const device of DEVICES) {
@@ -122,7 +155,7 @@ describe('start menu layout', () => {
       tg.destroy();
       t = null;
     }
-  }, 30_000);
+  });
 });
 
 describe('start menu behaviour', () => {

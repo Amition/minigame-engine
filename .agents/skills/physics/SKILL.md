@@ -6,10 +6,13 @@ description: >-
   arcade movement (platformer/top-down heroes vs tile maps). Covers choosing RigidWorld vs PhysicsWorld/ArcadeBody,
   fixed-step setup and interpolation, syncing nodes (bindRigidNode), contact events (contactBegin/contactEnd, touches) for
   game rules such as merging or scoring, sensors and category/mask filtering, raycast/queryPoint/queryAABB, impulses and
-  forces, sleeping, debug drawing (drawRigidWorld, RigidDebugView, dump), solver tuning (iterations, slop, margins,
+  forces, sleeping, joints (distance/rope/spring, revolute hinge with limits/motor/spring, weld, mouse drag, breakable
+  joints, group filtering), ragdoll and chain/rope/bridge presets (createRigidRagdoll, createRigidChain), debug drawing
+  (drawRigidWorld, RigidDebugView, dump), solver tuning (iterations, slop, margins,
   sleep thresholds, damping, substeps), pitfalls (tunnelling, mass ratios, design-unit scale) and headless vitest tests.
   Keywords: rigid body, collision, collision detection, stacking, friction, restitution, bounce, gravity, sensor, trigger,
-  raycast, Box2D-like, 物理引擎, 刚体, 碰撞, 堆叠, 弹性, 摩擦.
+  raycast, joint, hinge, motor, pendulum, rope, chain, bridge, ragdoll, Box2D-like, 物理引擎, 刚体, 碰撞, 堆叠, 弹性,
+  摩擦, 关节, 铰链, 绳子, 链条, 吊桥, 布娃娃.
 ---
 
 # Physics: RigidWorld and PhysicsWorld
@@ -27,8 +30,12 @@ Two systems live in `engine/world/` and are exported from `'@engine'`:
 Rule of thumb: character controllers on tile maps -> `PhysicsWorld`. Anything that must stack, roll or rotate ->
 `RigidWorld`. Do not mix the two on the same objects.
 
-Reference implementations: `sandbox/scenes/physics.ts` ('rigid-stack', 'rigid-plinko'), the 合成大西瓜 adapter
-`game/physics.ts`, tests `engine/world/rigid.test.ts`.
+Reference implementations: `sandbox/scenes/physics.ts` ('rigid-stack', 'rigid-plinko', 'rigid-joints'), the 合成大西瓜
+adapter `game/physics.ts`, tests `engine/world/rigid.test.ts` and `engine/world/rigid-joint.test.ts` (joints, presets).
+
+Hand-rolled physics (projectiles, Verlet bodies, hit tests outside any world) should use the pure geometry helpers in
+`engine/core/geom.ts`: segment sweeps vs circle / capsule / rotated box, box-local frames and ballistics
+(`ballisticAngle`, `ballisticMinSpeed`, `ballisticPath`). Cheat-sheet: [references/geometry.md](references/geometry.md).
 
 ## Quick start
 
@@ -163,6 +170,7 @@ Sensors report begin/end but never push. Sensor-sensor and static-static pairs a
 ```ts
 const PLAYER = 1, ENEMY = 2, PICKUP = 4;
 world.add({ shape, category: ENEMY, mask: PLAYER | ENEMY });   // both sides must accept each other
+world.add({ shape, group: -1 });   // same nonzero group: negative = never collide, positive = always (beats category/mask)
 
 world.queryPoint(x, y);                          // bodies containing the point (e.g. tap to poke)
 world.queryAABB({ x, y, w, h }, { mask: ENEMY }); // AABB overlap only (superset of shape overlap)
@@ -184,7 +192,214 @@ wake nor update the AABB, so always go through `setPosition`.
 Island sleeping: a group of touching bodies sleeps when every body is slower than `sleepLinear` / `sleepAngular`
 for `timeToSleep` seconds. Sleeping bodies cost nothing to simulate and are woken by contact begin/end, a removed
 support, impulses/forces/velocity/teleport, and `setShape`. `allowSleep: false` per body (e.g. the player) or per
-world. `awake: false` starts a pre-settled stack asleep.
+world. `awake: false` starts a pre-settled stack asleep. Jointed bodies share an island, so a ragdoll or bridge sleeps
+and wakes as one.
+
+## Joints
+
+`world.addJoint(opts)` connects two bodies that are already in the world and returns the typed joint
+(`RigidDistanceJoint`, `RigidRevoluteJoint`, `RigidWeldJoint`, `RigidMouseJoint`); `world.removeJoint(j)`;
+`world.joints` lists them in add order, `body.joints` per body. Either body may be static: a hidden pin is a static
+body with `category: 0, mask: 0`. `anchorA` / `anchorB` are body-local points (relative to the centre of mass),
+`anchor` is a world point. Angles are radians, positive = clockwise, measured as `b.angle - a.angle` relative to the
+creation pose.
+
+```ts
+import { rigidBox, rigidCircle, RigidWorld } from '@engine';
+
+const world = new RigidWorld({ gravity: 1600 });
+const pin = (x: number, y: number) => world.add({ type: 'static', shape: rigidCircle(4), x, y, category: 0, mask: 0 });
+
+// Distance: rigid rod (length = current distance), rope (minLength 0), spring (springHz).
+const bob = world.add({ shape: rigidCircle(24), x: 250, y: 200 });
+world.addJoint({ type: 'distance', name: 'rod', a: pin(100, 200), b: bob });                // pendulum, length 150
+const lamp = world.add({ shape: rigidBox(40, 30), x: 400, y: 380 });
+world.addJoint({ type: 'distance', a: pin(400, 100), b: lamp, anchorB: { x: 0, y: -15 }, minLength: 0, maxLength: 300 });
+const buoy = world.add({ shape: rigidCircle(20), x: 600, y: 300 });
+world.addJoint({ type: 'distance', a: pin(600, 150), b: buoy, springHz: 3, dampingRatio: 0.3 }); // bouncy, rest 150
+
+// Revolute: shared pivot (`anchor`, default b's centre) + optional limits, motor, angular spring toward targetAngle.
+const flap = world.add({ shape: rigidBox(160, 16), x: 280, y: 600 });
+const hinge = world.addJoint({
+  type: 'revolute', a: pin(200, 600), b: flap, anchor: { x: 200, y: 600 },
+  lowerAngle: -1.2, upperAngle: 1.2, springHz: 4, dampingRatio: 0.5,    // springy flap that holds level
+});
+const fan = world.add({ shape: rigidBox(200, 12), x: 550, y: 700 });
+const motor = world.addJoint({ type: 'revolute', a: pin(550, 700), b: fan, motorSpeed: 3, maxMotorTorque: 1e7 });
+
+// Weld: glue at the current relative pose (compound bodies, breakable structures).
+const blade = world.add({ shape: rigidBox(200, 12), x: 550, y: 700, angle: Math.PI / 2 });
+world.addJoint({ type: 'weld', a: fan, b: blade });
+
+// Mouse: pull a point of a body toward a target with a soft, force-limited spring.
+const drag = world.addJoint({ type: 'mouse', body: bob, target: { x: bob.x, y: bob.y } });
+drag.setTarget(300, 120);
+
+for (let i = 0; i < 120; i++) world.step();
+console.log(hinge.angle(), motor.speed(), world.dump());
+motor.setMotor(-3);                // or setMotor(0, torque) = joint friction
+hinge.setLimits(-0.3, 0.3);
+hinge.setTarget(0.5);              // spring rest angle
+world.removeJoint(drag);
+```
+
+- **Distance**: `length`, `minLength`, `maxLength`. Missing bounds default to `length` when rigid, so give
+  `maxLength` for a rope. With `springHz` the bounds default to 0 / Infinity (pure spring). `setLength(len, min?, max?)`,
+  `currentLength()`.
+- **Revolute**: `lowerAngle` / `upperAngle` (either one enables limits), `motorSpeed` (rad/s, b relative to a) with
+  `maxMotorTorque` (motor is off at 0), `targetAngle` + `springHz` / `dampingRatio` (angular spring, like an active
+  ragdoll joint). Methods: `angle()`, `speed()`, `setMotor(speed, maxTorque?)`, `setLimits(lo, hi)`, `setTarget(a)`,
+  `setSpring(hz, ratio?)`, `motorTorque()`. Wheels: `{ a: chassis, b: wheel }` (anchor defaults to the axle).
+- **Weld**: rigid by default; `springHz` makes the angular part soft (bendy).
+- **Mouse**: `{ body, target, anchor?, maxForce? (30000 * mass), springHz? (5), dampingRatio? (0.7) }`,
+  `setTarget(x, y)` wakes the body. `a` and `b` are both the dragged body.
+- Common options: `name` (shown in dumps), `collideConnected` (default **false**: the two jointed bodies pass through
+  each other; all other pairs still collide), `breakForce` / `breakTorque`, `userData`.
+- Every joint: `type a b name broken userData world`, `other(body)`, `reactionForce()` / `reactionTorque()` (last
+  substep, force units: mass * units/s²), `anchorWorldA(alpha?)` / `anchorWorldB(alpha?)` (pass `world.alpha` when
+  drawing interpolated), `describe()`.
+- `addJoint` / `removeJoint` are safe inside events (applied when the step ends). Adding or removing wakes both
+  bodies. Removing a body removes its joints; `clear()` removes all. Waking, moving or teleporting one body wakes the
+  bodies jointed to it.
+- Solver: joints are warm-started and solved with contacts in every velocity iteration and position pass, per
+  substep. Chains of many links and heavy loads on light links need more `velocityIterations` (ratio < 10:1 as
+  for stacks) or `substeps`.
+
+### Breakable joints
+
+```ts
+import { rigidBox, rigidCircle, RigidWorld } from '@engine';
+
+const world = new RigidWorld({ gravity: 1600 });
+const hook = world.add({ type: 'static', shape: rigidCircle(4), x: 375, y: 100, category: 0, mask: 0 });
+const crate = world.add({ shape: rigidBox(60, 60), x: 375, y: 300 });
+const rope = world.addJoint({
+  type: 'distance', name: 'rope', a: hook, b: crate, minLength: 0,
+  breakForce: 3 * crate.mass * 1600,                // snaps when yanked harder than 3x the crate's weight
+});
+world.on('jointBreak', (j) => console.log('snap', j.name, j.broken, world.joints.includes(j))); // snap rope true false
+crate.applyImpulse(0, 900 * crate.mass);            // yank down
+for (let i = 0; i < 10; i++) world.step();
+console.log(rope.broken);                           // true
+```
+
+A broken joint has already left the world when 'jointBreak' fires. Stress gauges and creak sounds can poll
+`reactionForce()` instead.
+
+### Drawing and debugging joints
+
+`drawRigidWorld` / `RigidDebugView` draw joints in purple: lines from each centre to its anchor, the anchor link
+(dashed for mouse joints) and revolute limit arcs; `{ joints: false }` hides them. Custom art: draw rods from
+`j.anchorWorldA(world.alpha)` to `j.anchorWorldB(world.alpha)` (see `paintRods` in the 'rigid-joints' scene).
+`world.dump()` adds `joints=N` to its first line and one line per joint (bodies by name or id, `#name` when set,
+`F` = reaction force), e.g. for the snippet above:
+
+```text
+  joint distance #rod id2-id1 len=150 rod=150 F=53185
+  joint distance id4-id3 len=300 range=0..300 F=1920
+  joint revolute id8-id7 @200,600 angle=5.4° limits=-68.8..68.8 spring=4Hz target=0° F=4102
+  joint revolute id10-id9 @550,700 angle=343.8° motor=3/10000000 F=7680
+  joint mouse id1-id1 target=300,120 F=54287
+```
+
+### Dragging with the pointer
+
+```ts
+// Inside a scene: `view` is the World node the physics lives in, `world` the RigidWorld.
+let drag: { joint: RigidMouseJoint; pointer: number } | null = null;
+view.interactive = true;
+view.on('pointerdown', (e) => {
+  const p = view.stageToWorld(e.x, e.y);
+  const body = world.queryPoint(p.x, p.y).find((b) => b.type === 'dynamic');
+  if (drag || !body) return;
+  drag = { joint: world.addJoint({ type: 'mouse', body, target: p, maxForce: 60000 * body.mass }), pointer: e.pointerId };
+});
+view.on('pointermove', (e) => {
+  if (drag?.pointer !== e.pointerId) return;
+  const p = view.stageToWorld(e.x, e.y);
+  drag.joint.setTarget(p.x, p.y);
+});
+const release = (e: PointerEvt) => {
+  if (drag?.pointer !== e.pointerId) return;
+  world.removeJoint(drag.joint);
+  drag = null;
+};
+view.on('pointerup', release);
+view.on('pointercancel', release);
+```
+
+## Presets
+
+`engine/world/rigid-presets.ts` builds common jointed rigs.
+
+### Ragdoll
+
+```ts
+import { createRigidRagdoll, rigidBox, RigidWorld } from '@engine';
+
+const world = new RigidWorld({ gravity: 1600 });
+world.add({ type: 'static', shape: rigidBox(2000, 100), x: 375, y: 1050 });           // floor top at y = 1000
+const guy = createRigidRagdoll(world, { x: 375, y: 1000 - 86, stiffness: 1, name: 'guy' }); // x, y = hip joint
+for (let i = 0; i < 60; i++) world.step();                                             // stands (springs hold the pose)
+const torso = guy.parts.torso;
+guy.impulse(torso.x, torso.y - 20, 400 * torso.mass, 0);                               // shove: it stumbles and falls
+world.on('contactBegin', (e) => {
+  const part = guy.partOf(e.a) ?? guy.partOf(e.b);
+  if (part === 'head' && e.approachSpeed > 400) guy.setStiffness(0);                   // knocked out: goes limp
+});
+for (let i = 0; i < 180; i++) world.step();
+console.log(guy.centerOfMass(), guy.joint.kneeF.angle());
+```
+
+- Ten parts `head torso upperArmF foreArmF upperArmB foreArmB thighF shinF thighB shinB` (F = front/near limbs,
+  B = back/far), nine revolute joints `neck shoulderF elbowF shoulderB elbowB hipF kneeF hipB kneeB` with human
+  limits (elbows and knees bend one way). `guy.bodies` is the draw order (back limbs, torso, head, front limbs).
+- Options: `scale` (1 = about 171 units tall: soles 86 * scale below `y`, head top 85 * scale above), `facing` (1 = faces
+  +x, -1 mirrored), `pose` ('stand' | 'limp'), `stiffness` (0 = limp ragdoll, default; 1 = holds the pose, an active
+  ragdoll; > 1 stiffer), `dampingRatio`, `jointFriction` (damps flailing, default 0.001 of weight * height), `angle`,
+  `vx` / `vy`, `density`, `friction`, `restitution`, `category`, `mask`, `group`, `breakForce` (dismemberment),
+  `name` (bodies `<name>.head`, ...), `userData`.
+- Parts never collide with each other: all share a fresh negative `group` (one per ragdoll). Pass the same negative
+  `group` to several ragdolls to stop them hitting each other too.
+- Methods: `setStiffness(k)` (wakes), `setPose(pose)`, `impulse(x, y, ix, iy)` (on the part under the point, returns
+  it), `partOf(body)`, `centerOfMass()`, `remove()`.
+- A stiff ragdoll stands on flat ground but has no balance controller: `impulse(chest, 250 * torso.mass, 0)`
+  topples it. To keep it upright, add an upright torque on the torso each step (forces apply to the next step):
+
+```ts
+world.on('step', () => {
+  const t = guy.parts.torso;
+  if (t.sleeping) return;                                      // applyTorque wakes: let a settled ragdoll sleep
+  t.applyTorque(-(t.angle * 1800 + t.av * 360) * t.inertia);   // now shrugs off shoves up to ~350 * torso.mass
+});
+```
+
+### Chains, ropes and bridges
+
+```ts
+import { createRigidChain, rigidBox, rigidCircle, RigidWorld } from '@engine';
+
+const world = new RigidWorld({ gravity: 1600 });
+// Hanging bridge: planks 3.5% longer than the gap so it sags; point ends are pinned to hidden static bodies.
+const bridge = createRigidChain(world, {
+  from: { x: 60, y: 400 }, to: { x: 690, y: 400 }, links: 16,
+  linkLength: (630 / 16) * 1.035, linkWidth: 12, density: 0.0015, name: 'bridge',
+});
+world.add({ shape: rigidBox(50, 50), x: 375, y: 300 });                              // a crate lands on it
+// Rope with a lamp: an end can be a body (anchor is body-local, default its centre).
+const lamp = world.add({ shape: rigidCircle(20), x: 200, y: 700 });
+createRigidChain(world, { from: { x: 200, y: 500 }, to: { body: lamp, anchor: { x: 0, y: -20 } }, links: 10, linkWidth: 4 });
+// Free end: without `to` the chain hangs straight down (links 20 long by default).
+const tail = createRigidChain(world, { from: { x: 600, y: 500 }, links: 12, name: 'tail' });
+for (let i = 0; i < 300; i++) world.step();
+console.log(bridge.bodies.length, bridge.joints.length, tail.bodies.at(-1)!.y);   // 16 17 730
+```
+
+- Returns `{ bodies, joints, pins, remove() }`; joints run pin/body -> link 0 -> ... -> last link -> pin/body.
+- `linkLength` defaults to span / links (taut) with `to`, else 20. Longer links start on a parabola that sags.
+- `jointFriction` (default 0.05 of one link's weight * length) damps swaying so bridges sleep; 0 = frictionless.
+- Non-adjacent links collide with each other by default; `group: -n` turns that off (a loose rope that folds).
+- `breakForce` on every joint (a bridge that snaps), `category` / `mask`, `friction`, `linearDamping`, `name`.
 
 ## Tuning
 
@@ -256,10 +471,17 @@ describe('crate stack', () => {
 - Shapes: `rigidCircle(r)`, `rigidBox(w, h)`, `rigidPolygon(points: number[] | Vec2[])`,
   `rigidShapeMass(shape, density)`; types `RigidShape`, `RigidCircleShape`, `RigidPolygonShape`.
 - `new RigidWorld(opts?: RigidWorldOptions)`: `add`, `remove`, `clear`, `get(name)`, `on`, `attach`, `update(dt)`,
-  `step(h?)`, `syncNodes(alpha?)`, `queryPoint`, `queryAABB`, `raycast`, `dump(maxBodies?)`; fields `bodies`,
-  `contacts`, `touches`, `time`, `steps`, `alpha`, `paused`, plus every option as a mutable field.
-- `RigidBody`: `x y angle vx vy av mass inertia sleeping userData node`, `setShape`, `setPosition`, `setVelocity`,
-  `applyForce`, `applyTorque`, `applyImpulse`, `applyAngularImpulse`, `wake`, `sleep`, `velocityAt`,
+  `step(h?)`, `syncNodes(alpha?)`, `queryPoint`, `queryAABB`, `raycast`, `addJoint`, `removeJoint`,
+  `dump(maxBodies?)`; fields `bodies`, `joints`, `contacts`, `touches`, `time`, `steps`, `alpha`, `paused`, plus every
+  option as a mutable field. Events `contactBegin`, `contactEnd`, `jointBreak` (payload `RigidJoint`), `step`.
+- `RigidBody`: `x y angle vx vy av mass inertia sleeping group joints userData node`, `setShape`, `setPosition`,
+  `setVelocity`, `applyForce`, `applyTorque`, `applyImpulse`, `applyAngularImpulse`, `wake`, `sleep`, `velocityAt`,
   `containsPoint`, `describe`, getters `awake`, `speed`, `shape`, `fixedRotation`.
+- Joints: options `RigidJointOptions` = `RigidDistanceJointOptions | RigidRevoluteJointOptions | RigidWeldJointOptions
+  | RigidMouseJointOptions` (+ `RigidJointCommonOptions`); classes `RigidJoint` (base), `RigidDistanceJoint`,
+  `RigidRevoluteJoint`, `RigidWeldJoint`, `RigidMouseJoint`.
+- Presets: `createRigidRagdoll(world, RigidRagdollOptions): RigidRagdoll`,
+  `createRigidChain(world, RigidChainOptions): RigidChain`; types `RigidRagdollPart`, `RigidRagdollJointName`,
+  `RigidRagdollPose`, `RigidChainEnd`.
 - Rendering: `bindRigidNode(node, body, RigidBindOptions)`, `drawRigidWorld(ctx, world, RigidDrawOptions)`,
   `RigidDebugView`.

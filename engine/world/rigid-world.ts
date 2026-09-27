@@ -13,6 +13,20 @@ import {
   type RigidRayScratch,
   type RigidWorldPoint,
 } from './rigid-collide';
+import {
+  createRigidJoint,
+  type RigidDistanceJoint,
+  type RigidDistanceJointOptions,
+  type RigidJoint,
+  type RigidJointOptions,
+  type RigidJointSolverSettings,
+  type RigidMouseJoint,
+  type RigidMouseJointOptions,
+  type RigidRevoluteJoint,
+  type RigidRevoluteJointOptions,
+  type RigidWeldJoint,
+  type RigidWeldJointOptions,
+} from './rigid-joint';
 
 /** One point of a contact manifold. Solver fields are internal. */
 export class RigidContactPoint {
@@ -127,6 +141,8 @@ export interface RigidContactEvent {
 export interface RigidWorldEvents {
   contactBegin: RigidContactEvent;
   contactEnd: RigidContactEvent;
+  /** A joint's reaction exceeded its breakForce / breakTorque; it has already left the world (`broken` is true). */
+  jointBreak: RigidJoint;
   /** After each step, once contact events and deferred adds/removes are done. Payload: step seconds. */
   step: number;
 }
@@ -198,13 +214,23 @@ function isActive(b: RigidBody): boolean {
   return b.type === 'kinematic' && (b.vx !== 0 || b.vy !== 0 || b.av !== 0);
 }
 
-type QueuedEvent = ['contactBegin' | 'contactEnd', RigidContactEvent];
+type QueuedEvent = ['contactBegin' | 'contactEnd', RigidContactEvent] | ['jointBreak', RigidJoint];
+
+/** A joint that must not let its two bodies collide links them (checked on AABB-overlapping pairs only). */
+function jointBlocksPair(a: RigidBody, b: RigidBody): boolean {
+  const list = a.joints.length <= b.joints.length ? a.joints : b.joints;
+  for (const j of list) {
+    if (!j.collideConnected && !j.broken && ((j.a === a && j.b === b) || (j.a === b && j.b === a))) return true;
+  }
+  return false;
+}
 
 /**
  * Rigid-body physics with rotation: circles and convex polygons, sequential impulses with warm starting and a
  * 2-point block solver, non-linear position correction with slop, speculative contacts within `contactMargin`,
- * island sleeping, category/mask filtering, sensors, contact events and queries. Deterministic: no randomness,
- * iteration order is insertion order (sort-and-sweep broadphase with id tie-breaks).
+ * island sleeping, category/mask/group filtering, sensors, contact events, queries and joints (distance, revolute,
+ * weld, mouse; see addJoint). Deterministic: no randomness, iteration order is insertion order (sort-and-sweep
+ * broadphase with id tie-breaks).
  *
  *     const world = new RigidWorld({ gravity: 1600 });
  *     world.add({ type: 'static', shape: rigidBox(750, 40), x: 375, y: 1200 });
@@ -243,6 +269,8 @@ export class RigidWorld implements System {
    * and resting contacts of sleeping bodies), each once, in detection order. Rebuilt every step.
    */
   readonly touches: RigidContact[] = [];
+  /** Joints in add order (see addJoint). */
+  readonly joints: RigidJoint[] = [];
   /** Simulated seconds and steps so far. */
   time = 0;
   steps = 0;
@@ -258,6 +286,12 @@ export class RigidWorld implements System {
   private readonly solverList: RigidContact[] = [];
   private readonly pendingAdd: RigidBody[] = [];
   private readonly pendingRemove: RigidBody[] = [];
+  private nextJointId = 1;
+  private readonly jointList: RigidJoint[] = [];
+  private readonly pendingJointAdd: RigidJoint[] = [];
+  private readonly pendingJointRemove: RigidJoint[] = [];
+  private readonly brokenJoints: RigidJoint[] = [];
+  private readonly jointSettings: RigidJointSolverSettings = { slop: 0.25, maxCorrection: 8 };
   private queue: QueuedEvent[] = [];
   private substepBegins: RigidContactEvent[] = [];
   private readonly events = new Emitter<RigidWorldEvents>();
@@ -327,10 +361,20 @@ export class RigidWorld implements System {
     this.drain();
   }
 
-  /** Removes everything at once (no contactEnd events). */
+  /** Removes everything at once, joints included (no contactEnd events). */
   clear(): void {
-    for (const b of this.bodies) b.world = null;
+    for (const j of this.joints) j.world = null;
+    for (const j of this.pendingJointAdd) j.world = null;
+    for (const b of this.bodies) {
+      b.world = null;
+      b.joints.length = 0;
+    }
     for (const b of this.pendingAdd) b.world = null;
+    this.joints.length = 0;
+    this.jointList.length = 0;
+    this.pendingJointAdd.length = 0;
+    this.pendingJointRemove.length = 0;
+    this.brokenJoints.length = 0;
     this.bodies.length = 0;
     this.sorted.length = 0;
     this.contacts.length = 0;
@@ -357,6 +401,7 @@ export class RigidWorld implements System {
   private detach(b: RigidBody): void {
     const i = this.bodies.indexOf(b);
     if (i < 0) return;
+    while (b.joints.length) this.detachJoint(b.joints[b.joints.length - 1]!);
     this.bodies.splice(i, 1);
     const j = this.sorted.indexOf(b);
     if (j >= 0) this.sorted.splice(j, 1);
@@ -378,6 +423,66 @@ export class RigidWorld implements System {
     list.length = n;
   }
 
+  // ---------------------------------------------------------------- joints
+
+  /**
+   * Connects two bodies of this world (both must be added first; the mouse joint takes one `body`). Wakes both.
+   * Inside a step / event callback the joint joins when the step ends. Removing a body removes its joints.
+   *
+   *     world.addJoint({ type: 'revolute', a: arm, b: hand, anchor: { x, y }, lowerAngle: -1, upperAngle: 0.5 });
+   *     world.addJoint({ type: 'distance', a: pivot, b: ball });                 // rigid rod at the current length
+   *     world.addJoint({ type: 'distance', a: hook, b: crate, minLength: 0 });   // rope: may get shorter, never longer
+   */
+  addJoint(opts: RigidDistanceJointOptions): RigidDistanceJoint;
+  addJoint(opts: RigidRevoluteJointOptions): RigidRevoluteJoint;
+  addJoint(opts: RigidWeldJointOptions): RigidWeldJoint;
+  addJoint(opts: RigidMouseJointOptions): RigidMouseJoint;
+  addJoint(opts: RigidJointOptions): RigidJoint;
+  addJoint(opts: RigidJointOptions): RigidJoint {
+    const j = createRigidJoint(opts);
+    if (j.a.world !== this || j.b.world !== this) throw new Error(`RigidWorld.addJoint(${opts.type}): add both bodies to this world first`);
+    if (j.a === j.b && j.type !== 'mouse') throw new Error(`RigidWorld.addJoint(${opts.type}): a and b are the same body`);
+    j.world = this;
+    if (this.stepping) this.pendingJointAdd.push(j);
+    else this.attachJoint(j);
+    return j;
+  }
+
+  /** Removes a joint and wakes its bodies. Safe inside event callbacks (applied when the step ends). */
+  removeJoint(j: RigidJoint): void {
+    if (j.world !== this) return;
+    j.world = null;
+    const i = this.pendingJointAdd.indexOf(j);
+    if (i >= 0) {
+      this.pendingJointAdd.splice(i, 1);
+      return;
+    }
+    if (this.stepping) this.pendingJointRemove.push(j);
+    else this.detachJoint(j);
+  }
+
+  private attachJoint(j: RigidJoint): void {
+    j.id = this.nextJointId++;
+    this.joints.push(j);
+    j.a.joints.push(j);
+    if (j.b !== j.a) j.b.joints.push(j);
+    j.a.wake();
+    j.b.wake();
+  }
+
+  private detachJoint(j: RigidJoint): void {
+    j.world = null;
+    const i = this.joints.indexOf(j);
+    if (i < 0) return;
+    this.joints.splice(i, 1);
+    const ia = j.a.joints.indexOf(j);
+    if (ia >= 0) j.a.joints.splice(ia, 1);
+    const ib = j.b.joints.indexOf(j);
+    if (ib >= 0) j.b.joints.splice(ib, 1);
+    j.a.wake();
+    j.b.wake();
+  }
+
   /** Called by RigidBody.setPosition: wakes bodies that touched it or overlap its new place. */
   onTeleport(b: RigidBody): void {
     if (b.world !== this) return;
@@ -396,7 +501,7 @@ export class RigidWorld implements System {
 
   // ---------------------------------------------------------------- events / loop
 
-  /** Subscribes to 'contactBegin' / 'contactEnd' / 'step'. Returns a remover. */
+  /** Subscribes to 'contactBegin' / 'contactEnd' / 'jointBreak' / 'step'. Returns a remover. */
   on<K extends keyof RigidWorldEvents>(type: K, fn: (e: RigidWorldEvents[K]) => void): () => void {
     return this.events.on(type, fn);
   }
@@ -468,6 +573,10 @@ export class RigidWorld implements System {
       const n = Math.max(1, Math.floor(this.substeps));
       for (let i = 0; i < n; i++) this.substep(h / n);
       for (const b of this.bodies) b.fx = b.fy = b.torque = 0;
+      if (this.brokenJoints.length) {
+        for (const j of this.brokenJoints) this.detachJoint(j);
+        this.brokenJoints.length = 0;
+      }
       this.time += h;
       this.steps++;
     } finally {
@@ -477,7 +586,7 @@ export class RigidWorld implements System {
     this.events.emit('step', h);
   }
 
-  /** Emits queued contact events and applies deferred removes/adds until nothing is left. */
+  /** Emits queued contact / joint events and applies deferred removes/adds until nothing is left. */
   private drain(): void {
     const was = this.stepping;
     this.stepping = true;
@@ -486,13 +595,26 @@ export class RigidWorld implements System {
         if (this.queue.length) {
           const q = this.queue;
           this.queue = [];
-          for (const [type, e] of q) this.events.emit(type, e);
+          for (const e of q) {
+            if (e[0] === 'jointBreak') this.events.emit('jointBreak', e[1]);
+            else this.events.emit(e[0], e[1]);
+          }
         } else if (this.pendingRemove.length) {
           const list = this.pendingRemove.splice(0);
           for (const b of list) if (b.world !== this) this.detach(b);
+        } else if (this.pendingJointRemove.length) {
+          const list = this.pendingJointRemove.splice(0);
+          for (const j of list) if (j.world !== this) this.detachJoint(j);
         } else if (this.pendingAdd.length) {
           const list = this.pendingAdd.splice(0);
           for (const b of list) if (b.world === this) this.attachBody(b);
+        } else if (this.pendingJointAdd.length) {
+          const list = this.pendingJointAdd.splice(0);
+          for (const j of list) {
+            if (j.world !== this) continue;
+            if (j.a.world === this && j.b.world === this) this.attachJoint(j);
+            else j.world = null;
+          }
         } else break;
       }
     } finally {
@@ -539,7 +661,12 @@ export class RigidWorld implements System {
     }
 
     this.prepareContacts(h);
-    for (let i = 0; i < this.velocityIterations; i++) this.solveVelocities();
+    const joints = this.prepareJoints(h);
+    for (let i = 0; i < this.velocityIterations; i++) {
+      for (let k = 0; k < joints.length; k++) joints[k]!.solveVelocity();
+      this.solveVelocities();
+    }
+    if (joints.length) this.checkJointBreaks();
     this.applyRestitution();
     this.speculativeTouches();
 
@@ -565,7 +692,18 @@ export class RigidWorld implements System {
         b.s = Math.sin(b.angle);
       }
     }
-    for (let i = 0; i < this.positionIterations; i++) if (this.solvePositions()) break;
+    const js = this.jointSettings;
+    js.slop = this.slop;
+    js.maxCorrection = this.maxCorrection;
+    for (let i = 0; i < this.positionIterations; i++) {
+      const contactsOk = this.solvePositions();
+      let jointsOk = true;
+      for (let k = 0; k < joints.length; k++) {
+        const j = joints[k]!;
+        if (!j.broken && !j.solvePosition(js)) jointsOk = false;
+      }
+      if (contactsOk && jointsOk) break;
+    }
     for (const b of bodies) if (isActive(b)) b.syncTransform();
 
     for (const e of this.substepBegins) e.impulse = e.sensor ? 0 : e.contact.impulse;
@@ -601,6 +739,7 @@ export class RigidWorld implements System {
         if (b.minX > a.maxX + r || b.minY > a.maxY + r || b.maxY < a.minY - r) continue;
         if (!aActive && !isActive(b)) continue;
         if (!shouldCollide(a, b)) continue;
+        if (a.joints.length !== 0 && b.joints.length !== 0 && jointBlocksPair(a, b)) continue;
         const key = pairKey(a.id, b.id);
         let c = this.contactMap.get(key);
         if (!c) {
@@ -740,7 +879,10 @@ export class RigidWorld implements System {
     }
   }
 
-  /** Sleeping bodies touching an awake body (or a moving kinematic) wake, transitively, keeping their timers. */
+  /**
+   * Sleeping bodies touching or jointed to an awake body (or a moving kinematic) wake, transitively, keeping their
+   * timers.
+   */
   private propagateWake(): void {
     let any = false;
     for (const b of this.bodies) {
@@ -755,16 +897,37 @@ export class RigidWorld implements System {
       changed = false;
       for (const c of this.contacts) {
         if (c.count === 0 || c.sensor) continue;
-        const a = c.a;
-        const b = c.b;
-        if (a.sleeping && !b.sleeping && isActive(b)) {
-          a.sleeping = false;
-          changed = true;
-        } else if (b.sleeping && !a.sleeping && isActive(a)) {
-          b.sleeping = false;
-          changed = true;
-        }
+        if (wakePair(c.a, c.b)) changed = true;
       }
+      for (const j of this.joints) if (wakePair(j.a, j.b)) changed = true;
+    }
+  }
+
+  /** Joints to solve this substep (an awake dynamic body on either side); prepares them and warm starts. */
+  private prepareJoints(h: number): RigidJoint[] {
+    const list = this.jointList;
+    list.length = 0;
+    if (this.joints.length === 0) return list;
+    const warm = this.warmStarting;
+    for (const j of this.joints) {
+      if (j.broken || j.world !== this) continue;
+      const a = j.a;
+      const b = j.b;
+      if ((a.type !== 'dynamic' || a.sleeping) && (b.type !== 'dynamic' || b.sleeping)) continue;
+      j.prepare(h, warm);
+      list.push(j);
+    }
+    return list;
+  }
+
+  /** Marks joints whose reaction exceeded their limits as broken; they leave the world at the end of the step. */
+  private checkJointBreaks(): void {
+    for (const j of this.jointList) {
+      if (j.breakForce === Infinity && j.breakTorque === Infinity) continue;
+      if (j.reactionForce() <= j.breakForce && Math.abs(j.reactionTorque()) <= j.breakTorque) continue;
+      j.broken = true;
+      this.brokenJoints.push(j);
+      this.queue.push(['jointBreak', j]);
     }
   }
 
@@ -1158,7 +1321,7 @@ export class RigidWorld implements System {
     return minSep >= -3 * slop;
   }
 
-  /** Island sleeping: bodies connected by touching contacts sleep together once all were slow for timeToSleep. */
+  /** Island sleeping: bodies connected by contacts or joints sleep together once all were slow for timeToSleep. */
   private updateSleep(h: number): void {
     if (!this.allowSleep) return;
     const bodies = this.bodies;
@@ -1186,28 +1349,29 @@ export class RigidWorld implements System {
       }
       return i;
     };
-    for (const c of this.solverList) {
-      const a = c.a;
-      const b = c.b;
-      if (a.type === 'dynamic' && b.type === 'dynamic') {
-        const ra = find(a.slot);
-        const rb = find(b.slot);
-        if (ra !== rb) parent[ra < rb ? rb : ra] = ra < rb ? ra : rb;
-      }
-    }
+    const union = (a: RigidBody, b: RigidBody): void => {
+      if (a.type !== 'dynamic' || b.type !== 'dynamic') return;
+      const ra = find(a.slot);
+      const rb = find(b.slot);
+      if (ra !== rb) parent[ra < rb ? rb : ra] = ra < rb ? ra : rb;
+    };
+    for (const c of this.solverList) union(c.a, c.b);
+    for (const j of this.jointList) union(j.a, j.b);
     for (let i = 0; i < n; i++) {
       const b = bodies[i]!;
       if (b.type !== 'dynamic' || b.sleeping) continue;
       const r = find(i);
       if (b.sleepTime < minSleep[r]!) minSleep[r] = b.sleepTime;
     }
-    // A moving kinematic keeps whatever it touches awake.
-    for (const c of this.solverList) {
-      const k = c.a.type === 'kinematic' ? c.a : c.b.type === 'kinematic' ? c.b : null;
-      if (!k || !isActive(k)) continue;
-      const d = k === c.a ? c.b : c.a;
+    // A moving kinematic keeps whatever it touches or is jointed to awake.
+    const kinematicWake = (a: RigidBody, b: RigidBody): void => {
+      const k = a.type === 'kinematic' ? a : b.type === 'kinematic' ? b : null;
+      if (!k || !isActive(k)) return;
+      const d = k === a ? b : a;
       if (d.type === 'dynamic') minSleep[find(d.slot)] = 0;
-    }
+    };
+    for (const c of this.solverList) kinematicWake(c.a, c.b);
+    for (const j of this.jointList) kinematicWake(j.a, j.b);
     const limit = this.timeToSleep;
     for (let i = 0; i < n; i++) {
       const b = bodies[i]!;
@@ -1273,7 +1437,7 @@ export class RigidWorld implements System {
 
   // ---------------------------------------------------------------- debugging
 
-  /** Text summary: counts on the first line, then one line per body (up to maxBodies). */
+  /** Text summary: counts on the first line, then one line per body and one per joint (up to maxBodies each). */
   dump(maxBodies = 60): string {
     let awake = 0;
     let sleeping = 0;
@@ -1286,10 +1450,13 @@ export class RigidWorld implements System {
     let touching = 0;
     for (const c of this.contacts) if (c.touching) touching++;
     const lines = [
-      `RigidWorld t=${this.time.toFixed(2)}s steps=${this.steps} bodies=${this.bodies.length} awake=${awake} sleeping=${sleeping} static=${fixed} contacts=${this.contacts.length} touching=${touching} gravity=${this.gravityX},${this.gravityY}`,
+      `RigidWorld t=${this.time.toFixed(2)}s steps=${this.steps} bodies=${this.bodies.length} awake=${awake} sleeping=${sleeping} static=${fixed} contacts=${this.contacts.length} touching=${touching} gravity=${this.gravityX},${this.gravityY}` +
+        (this.joints.length ? ` joints=${this.joints.length}` : ''),
     ];
     for (const b of this.bodies.slice(0, maxBodies)) lines.push('  ' + b.describe());
     if (this.bodies.length > maxBodies) lines.push(`  ... ${this.bodies.length - maxBodies} more`);
+    for (const j of this.joints.slice(0, maxBodies)) lines.push('  ' + j.describe());
+    if (this.joints.length > maxBodies) lines.push(`  ... ${this.joints.length - maxBodies} more joints`);
     return lines.join('\n');
   }
 }
@@ -1300,5 +1467,19 @@ function shouldCollide(a: RigidBody, b: RigidBody): boolean {
     if (!a.sensor && !b.sensor) return false;
     if (a.type === 'static' && b.type === 'static') return false;
   }
+  if (a.group !== 0 && a.group === b.group) return a.group > 0;
   return (a.category & b.mask) !== 0 && (b.category & a.mask) !== 0;
+}
+
+/** Wakes the sleeping side of a pair whose other side is active (propagateWake). */
+function wakePair(a: RigidBody, b: RigidBody): boolean {
+  if (a.sleeping && !b.sleeping && isActive(b)) {
+    a.sleeping = false;
+    return true;
+  }
+  if (b.sleeping && !a.sleeping && isActive(a)) {
+    b.sleeping = false;
+    return true;
+  }
+  return false;
 }

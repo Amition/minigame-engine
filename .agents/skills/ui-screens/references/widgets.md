@@ -60,8 +60,19 @@ Taps on Button/Toggle/Checkbox/Segmented/Tabs emit `uiEvents` `'tap'` (node); va
 |---|---|
 | `Badge` | `count` (hidden at 0 unless `showZero`), `dot`, `max` (99, shows `99+`), `color`, `textColor`; `badge.count = 5` |
 | `StarRating` (`ui.stars`) | `value`, `max` (3), `size` (72), `gap`, `arc` (middle star raised), `animate` (pop in one by one), `color`; `play()` replays |
-| `UIIcon` (`ui.icon(src, props)`) | `size` (48), `color` (tints glyphs only; default `text`) |
-| `UIImage` (`ui.image(src, props)`) | `fit`: `contain` (default), `cover`, `fill`; box props |
+| `UIIcon` (`ui.icon(src, props)`) | `size` (48), `color` (built-in glyphs only; default `text`), `tint` (recolours texture icons, see below; also colours a glyph fallback), `tintMode` (`multiply` default / `fill`), `duotone: [dark, light]` (wins over `tint`) |
+| `UIImage` (`ui.image(src, props)`) | `fit`: `contain` (default), `cover`, `fill`; `tint`, `tintMode`, `duotone` like icons; box props |
+
+Texture icons and images are drawn as painted unless you recolour them (colours take theme tokens or CSS colours,
+resolved at draw time; the bake is cached per texture + colour, see `tintTexture` in the code-art skill):
+
+- `tint: 'danger'` multiplies the art by the colour: white-on-transparent art becomes that colour, painted shading
+  and dark details stay. `tintMode: 'fill'` paints a flat silhouette instead (locked / disabled look).
+- `duotone: ['surface', 'text']` maps brightness: black -> first colour, white -> second. Use it for white art on
+  a light button: `ui.icon('art:skull', { size: 30, duotone: [buttonFace, ink] })` draws ink-coloured art whose
+  painted holes (eye sockets) show the button face.
+- `color` still only affects built-in glyphs; a missing texture keeps the glyph fallback / `missing-texture` lint.
+- Dumps and selectors show them: `Icon[tint=danger]`, `Icon[duotone=surface/text]`, `Image[tintMode=fill]`.
 
 ## Modal / Dialog / Toast
 

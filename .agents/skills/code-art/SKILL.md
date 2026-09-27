@@ -34,7 +34,8 @@ faces, `game/scenes/gallery.ts` review scene). Toolkit showcase: sandbox scene `
 | Cute character / enemy in one line | `creatureTexture({ seed, body, eyes, accessory })`, `creatureFrames(opts, 'idle', 8)` |
 | Ground, water, wood, sky, stars, noise backdrop | `patternTexture(name, { width, height, size, seed })`, `noiseTexture(w, h, { ramp, steps, tileable })` |
 | Hero object with custom look | painter `(ctx, ...) => void` + `bakeTexture(w, h, draw, { resolution: 2 })` |
-| Variants of an existing texture | `outlineTexture`, `glowTexture`, `dropShadowTexture`, `tintTexture`, `recolorTexture`, `flipTexture` |
+| Same art in several colours (team colours, ink on light buttons, locked grey) | `tintTexture`, `duotoneTexture`, `Sprite.tint`, `ui.icon(key, { tint / duotone })` (below) |
+| Variants of an existing texture | `outlineTexture`, `glowTexture`, `dropShadowTexture`, `silhouetteTexture`, `recolorTexture`, `flipTexture` |
 | Many small textures | `TextureAtlas` (`atlas.add(key, w, h, draw)`) |
 
 ## Bake at boot
@@ -120,6 +121,46 @@ Use only the portable Canvas subset (`engine/gfx/types.ts`): paths, arc/arcTo/el
 gradients, shadows, `globalCompositeOperation`, `drawImage`, text, `get/putImageData`. No `Path2D`,
 `ctx.filter`, `ctx.roundRect`, conic gradients or DOM APIs (they break on WeChat/Douyin/headless).
 
+## Tinting and recolouring textures
+
+Paint neutral art once (white or light grey on transparent, details in darker greys) and recolour it instead of
+baking one copy per colour by hand. Source `engine/gfx/tint.ts`, demo scene `art-tint` (`sandbox/scenes/art.ts`).
+
+```ts
+import { duotoneTexture, Sprite, tintTexture, ui } from '@engine';
+
+tintTexture('art:skull', '#e03131');                          // multiply: white -> colour, shading and dark details kept
+tintTexture(hero, '#1e1e22', { mode: 'fill' });               // flat silhouette, alpha kept (locked / shadow)
+tintTexture(hero, '#ffffff', { mode: 'fill', amount: 0.6 });  // 60 % white flash
+duotoneTexture('art:skull', '#d9d9de', '#1e1e22');            // black -> dark, white -> light: ink on a light button
+
+new Sprite('enemy', { tint: '#4dabf7' });                     // or sprite.tint = '#4dabf7' / null; tintMode: 'fill'
+ui.icon('art:skull', { size: 30, tint: 'danger' });           // theme tokens resolve; tintMode like Sprite
+ui.icon('art:gear', { size: 40, duotone: ['surface', 'text'] });   // [dark, light]; ui.image takes the same props
+```
+
+- **Modes**: `'multiply'` (default) multiplies every colour by the tint, keeps alpha and shading; black stays
+  black. `'fill'` paints the tint over the opaque pixels (a silhouette at `amount` 1). `amount` (0..1) and the
+  colour's own alpha fade the effect in. `duotoneTexture` maps Rec. 601 brightness black -> `dark`,
+  white -> `light` (alpha kept, scaled by the colours' alpha): the tool for white art on light buttons, where
+  multiply would leave painted holes black.
+- **Cache**: results are cached per source Texture object + params (a WeakMap, so nothing leaks with the source)
+  and baked at the source's resolution (`resolution` overrides, `'auto'` allowed). Re-registering a key
+  (`textures.set`) gives a new Texture, so the next call bakes a fresh tint. Keep up to 16 variants per source;
+  every distinct colour is a separate canvas, so do not animate `tint` through many colours (flash with
+  `alpha`, a fixed `fill` tint or a second sprite). `clearTintCache()` forgets everything (tests, theme switch).
+  A white multiply (or `amount` 0) returns the source itself.
+- **Keys**: strings resolve through `textures`; an unregistered key returns a 1x1 transparent placeholder named
+  `missing:<key>` (not cached). Widgets resolve the key themselves, so `ui.icon(key, { tint })` keeps the glyph
+  fallback and the `missing-texture` lint; prefer that over `ui.icon(tintTexture(key, ...))`.
+- **Memory**: each variant costs what its source costs (`textureStats()` lists them as
+  `tint:<key>~<color>[~fill][~amount][@<res>x]` and `duotone:<key>~<dark>~<light>`).
+- **Runtimes**: multiply bakes with `globalCompositeOperation` ('multiply' then 'destination-in'), fill with
+  'source-atop'; where 'multiply' is missing (probed once, `tintMultiplySupported()`) it falls back to a
+  getImageData loop. Duotone always reads pixels at bake time. `method: 'pixels'` forces the loop (exact colours
+  on semi-transparent edges, where the composite path lightens dark soft edges slightly).
+- Dumps and selectors: `Sprite[tint=#ff0000]`, `Sprite[tintMode=fill]`, `Icon[duotone=surface/text]`.
+
 ## SVG
 
 `svgTexture` supports paths, basic shapes, groups/transforms, `<use>`, linear/radial gradients, `clipPath`,
@@ -154,6 +195,7 @@ details lost at real size, silhouettes that don't match hit/physics shapes.
 - `registerIcons()` with the default `icon:` prefix replaces the UI kit's built-in glyphs in every button
   (drawn untinted). Use `registerIcons({ prefix: 'art:' })` unless that is intended (see the `ui-screens` skill).
 - Effects (`outlineTexture`, `glowTexture`, `recolorTexture`...) read pixels: bake them once, not per frame.
+  `tintTexture` / `duotoneTexture` are cached, so calling them in `draw()` is fine for a few fixed colours.
 - Pass `seed` to `creatureTexture`, `shapeTexture('blob' | 'cloud' | 'burst')`, `noiseTexture`, `patternTexture`
   so art is identical across runs, tests and screenshots.
 - Texture memory and `resolution` trade-offs (including the adaptive resolution option and texture stats) are

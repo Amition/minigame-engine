@@ -436,7 +436,7 @@ function effectsSheet(): Sheet {
   const slime = pixelSprite(pixelSamples.slime!, pixelPalette, { scale: 6, outline: '#1a1c2c', shade: true });
   const g = sh.group('texture effects', 150, 150, 'checker');
   g.cells.push({ label: 'original', tex: base });
-  g.cells.push({ label: "tintTexture #ff3b3b .6", tex: tintTexture(base, '#ff3b3b', { amount: 0.6 }) });
+  g.cells.push({ label: "tint fill #ff3b3b .6", tex: tintTexture(base, '#ff3b3b', { mode: 'fill', amount: 0.6 }) });
   g.cells.push({ label: "tint multiply #7ad0ff", tex: tintTexture(base, '#7ad0ff', { mode: 'multiply' }) });
   g.cells.push({ label: 'silhouetteTexture', tex: silhouetteTexture(base, '#1a1c2c') });
   g.cells.push({ label: 'outlineTexture white 4', tex: outlineTexture(base, { color: '#ffffff', width: 4 }) });

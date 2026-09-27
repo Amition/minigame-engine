@@ -163,8 +163,11 @@ export function buildUI(spec: UISpec | string): Node {
 // ---------------------------------------------------------------- screens
 
 export interface MountOptions {
-  /** Area the screen fills: 'safe' (default; game.safe), 'view' (whole visible area), or a rect / rect getter. */
-  area?: 'safe' | 'view' | Rect | (() => Rect);
+  /**
+   * Area the screen fills: 'safe' (default; game.safe), 'view' (whole visible area), or a rect / rect getter in the
+   * mount parent's coordinates. Getters receive the mount parent (see followNode, which tracks a world node).
+   */
+  area?: 'safe' | 'view' | Rect | ((parent: Node | null) => Rect);
   /** Deprecated alias: safeArea false = area 'view'. */
   safeArea?: boolean;
   /** Paint this color behind the whole view (outside the safe area too). */
@@ -178,7 +181,7 @@ export interface MountOptions {
  * content (a column, stretched to fill).
  */
 export class UIScreen extends UIView {
-  area: 'safe' | 'view' | Rect | (() => Rect);
+  area: NonNullable<MountOptions['area']>;
   private key = '';
 
   constructor(area: MountOptions['area'] = 'safe', background?: UIColor) {
@@ -192,7 +195,7 @@ export class UIScreen extends UIView {
   /** Current area in the parent's coordinates. */
   rect(): Rect {
     const a = this.area;
-    if (typeof a === 'function') return a();
+    if (typeof a === 'function') return a(this.parent);
     if (typeof a === 'object') return a;
     const g = Game.current;
     const p = this.parent;

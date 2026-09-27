@@ -8,11 +8,13 @@ export * from './core/color';
 export * from './core/game';
 export * from './core/app';
 export * from './core/stats';
+export * from './core/geom';
 
 export * from './gfx/types';
 export * from './gfx/texture';
 export * from './gfx/textures';
 export * from './gfx/draw';
+export * from './gfx/tint';
 
 export * from './platform/types';
 export * from './platform/current';

@@ -1,6 +1,7 @@
 import type { Ctx2D } from '../gfx/types';
 import type { Texture } from '../gfx/texture';
 import { textures } from '../gfx/textures';
+import { duotoneTexture, tintTexture, type TintMode, type TintTextureOptions } from '../gfx/tint';
 import { roundRectPath } from '../gfx/draw';
 import type { Size } from './layout';
 import { uiColor, type UIColor } from './theme';
@@ -15,6 +16,23 @@ export function resolveUITexture(src: UIIconSource | null | undefined): Texture 
   if (typeof src !== 'string') return src;
   return textures.tryGet(src) ?? (src.startsWith('icon:') ? undefined : textures.tryGet('icon:' + src)) ?? null;
 }
+
+const FILL_TINT: TintTextureOptions = { mode: 'fill' };
+
+/** `tex` recoloured by a widget's `duotone` (wins) or `tint` props, theme tokens resolved; `tex` when neither is set. */
+export function uiRecolorTexture(
+  tex: Texture,
+  tint: UIColor | null | undefined,
+  mode: TintMode | undefined,
+  duotone: readonly [UIColor, UIColor] | null | undefined,
+): Texture {
+  if (duotone) return duotoneTexture(tex, uiColor(duotone[0]), uiColor(duotone[1]));
+  if (tint) return tintTexture(tex, uiColor(tint), mode === 'fill' ? FILL_TINT : undefined);
+  return tex;
+}
+
+/** `duotone` for dumps and selectors: 'dark/light'. */
+export const uiDuotoneName = (d: readonly [UIColor, UIColor] | null | undefined): string | undefined => (d ? `${d[0]}/${d[1]}` : undefined);
 
 /** Key/name of an icon source for dumps. */
 export function uiIconName(src: UIIconSource | null | undefined): string {
@@ -393,8 +411,14 @@ export interface IconProps extends UINodeProps {
   src?: UIIconSource | null;
   /** Square size in design units (default 48). */
   size?: number;
-  /** Tint for built-in glyphs (textures are drawn as-is). */
+  /** Colour of built-in glyphs (textures are drawn as-is; recolour them with `tint` / `duotone`). */
   color?: UIColor;
+  /** Recolours a texture icon (tintTexture, cached): 'multiply' turns white art into this colour. Also colours a glyph fallback. */
+  tint?: UIColor | null;
+  /** Default 'multiply'; 'fill' paints a flat silhouette. */
+  tintMode?: TintMode;
+  /** [dark, light]: texture brightness black -> dark, white -> light (duotoneTexture); wins over `tint`. */
+  duotone?: [UIColor, UIColor] | null;
 }
 
 /** An icon: registered texture, else a built-in vector glyph, else nothing (lint reports missing-texture). */
@@ -402,12 +426,18 @@ export class UIIcon extends UIView {
   src: UIIconSource | null;
   size: number;
   color: UIColor;
+  tint: UIColor | null;
+  tintMode: TintMode;
+  duotone: [UIColor, UIColor] | null;
 
   constructor(props: IconProps = {}) {
     super(props, 'Icon');
     this.src = props.src ?? null;
     this.size = props.size ?? 48;
     this.color = props.color ?? 'text';
+    this.tint = props.tint ?? null;
+    this.tintMode = props.tintMode ?? 'multiply';
+    this.duotone = props.duotone ?? null;
   }
 
   /** True when neither a texture nor a glyph fallback is available. */
@@ -425,10 +455,23 @@ export class UIIcon extends UIView {
 
   override draw(ctx: Ctx2D): void {
     super.draw(ctx);
-    drawUIIcon(ctx, this.src, 0, 0, this.width, this.height, uiColor(this.color));
+    const tex = resolveUITexture(this.src);
+    if (tex) {
+      drawUIIcon(ctx, uiRecolorTexture(tex, this.tint, this.tintMode, this.duotone), 0, 0, this.width, this.height, '');
+      return;
+    }
+    const glyph = this.tint ?? (this.duotone ? this.duotone[1] : this.color);
+    drawUIIcon(ctx, this.src, 0, 0, this.width, this.height, uiColor(glyph));
   }
 
   override describe() {
-    return { ...super.describe(), icon: uiIconName(this.src), missing: this.missing || undefined };
+    return {
+      ...super.describe(),
+      icon: uiIconName(this.src),
+      tint: this.tint || undefined,
+      tintMode: this.tint && this.tintMode !== 'multiply' ? this.tintMode : undefined,
+      duotone: uiDuotoneName(this.duotone),
+      missing: this.missing || undefined,
+    };
   }
 }

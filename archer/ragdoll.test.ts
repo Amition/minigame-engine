@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TOWER_TOP, TOWER_X } from './layout';
-import { NECK_BONE, Ragdoll, segCircle, segRect, segSeg, TORSO_BONE } from './ragdoll';
+import { NECK_BONE, Ragdoll, TORSO_BONE } from './ragdoll';
 import { BODY, BONES, J, WORLD_H, type PlatformView } from './types';
 
 const DT = 1 / 60;
@@ -149,23 +149,5 @@ describe('ragdoll', () => {
     expect(th?.head).toBe(false);
     expect(th?.bone).toBe(TORSO_BONE);
     expect(r.sweep(c.x + 100, c.y - 300, c.x - 100, c.y - 300)).toBeNull();
-  });
-});
-
-describe('geometry helpers', () => {
-  it('closest points of two segments', () => {
-    const out = { s: 0, t: 0, d2: 0 };
-    segSeg(0, 0, 10, 0, 5, -5, 5, 5, out);
-    expect(out.d2).toBeCloseTo(0);
-    expect(out.s).toBeCloseTo(0.5);
-    segSeg(0, 0, 10, 0, 0, 3, 10, 3, out);
-    expect(out.d2).toBeCloseTo(9);
-  });
-
-  it('segment vs circle and rotated rectangle', () => {
-    expect(segCircle(-10, 0, 20, 0, 0, 0, 5)).toBeCloseTo(0.25);
-    expect(segCircle(-10, 10, 20, 0, 0, 0, 5)).toBeNull();
-    expect(segRect(-100, 0, 100, 0, { ...block, x: 0, y: 0 })).toBeCloseTo((100 - diag) / 200, 3);
-    expect(segRect(-100, -200, 100, -200, { ...block, x: 0, y: 0 })).toBeNull();
   });
 });

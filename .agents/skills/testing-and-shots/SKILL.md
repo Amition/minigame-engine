@@ -3,12 +3,13 @@ name: testing-and-shots
 description: >-
   How to verify games built on this engine without a phone: Vitest tests with createTestGame (headless game;
   tap/drag/press/advance, find/get/dump, screenshot/png, played sounds), render modes and pixelRatio for fast tests,
-  seeds and determinism, test isolation, playing a whole game inside a test, UI lint (lintUI, --lint, --bounds),
-  headless and real-browser screenshots (pnpm shot, pnpm shot:browser) and the encoding lint (pnpm lint:encoding).
+  seeds and determinism, balance tests over many seeds (sweepSeeds / formatSweep), test isolation, playing a whole
+  game inside a test, UI lint (lintUI, --lint, --bounds), headless and real-browser screenshots (pnpm shot,
+  pnpm shot:browser) and the encoding lint (pnpm lint:encoding).
   Use when writing, debugging or speeding up tests, when a test times out, when you need to look at a screen or
   check a layout on several devices, before calling UI work done, and after editing files that contain CJK text.
   Keywords: test, vitest, createTestGame, headless, screenshot, shot, browser, lint, UI lint, bounds, timeout,
-  determinism, seed, encoding, BOM, 截图, 测试.
+  slow tests, determinism, seed, sweepSeeds, balance, median, encoding, BOM, 截图, 测试.
 ---
 
 # Testing and screenshots
@@ -21,7 +22,8 @@ Text beats pixels: prefer `t.dump()`, model state and `lintUI` in tests; take sc
 | All tests (typecheck first) | `pnpm check` = `pnpm typecheck && pnpm test` |
 | One file / one test | `npx vitest run game/play.test.ts` / `npx vitest run -t "pause menu"` |
 | Look at a scene | `pnpm shot --scene play` then Read `.shots/<app>-play-iphone-14.png` |
-| UI check on 3 devices | `pnpm shot --scene title --device iphone-se,iphone-14,ipad --lint --bounds` |
+| UI check on 3 devices | `pnpm shot --scene title --device "iphone-se,iphone-14,ipad" --lint --bounds` |
+| Per-file timings | `pnpm exec vitest run --reporter=json --outputFile=$env:TEMP\vitest.json` |
 | Same in real Chrome | `pnpm shot:browser --scene title --lint` |
 | Encoding damage | `pnpm lint:encoding` |
 
@@ -115,6 +117,16 @@ t.renderMode = 'every';                                                        /
 `pixelRatio: 1` makes drawn frames 4x cheaper and screenshots slightly softer (still CSS size). Keep the default
 DPR 2 for screenshots you want to inspect closely and for pixel assertions at exact coordinates.
 
+Which options a game test should use:
+
+- Play-throughs, model / HUD text assertions, taps, sounds and UI lint: `render: 'none'`. Lint, hit tests and
+  `worldBounds()` only need layout, which runs on undrawn frames too, so results are identical and the test skips
+  every draw (about a third faster for the archer/game suites).
+- Also `pixelRatio: 1` when the file never takes a screenshot. Files with env-gated shots (`GAME_SHOTS`) keep the
+  device DPR so those shots stay sharp; with `render: 'none'` the DPR only costs when a shot is taken.
+- Keep `'last'` / `'every'` only when the test reads what was drawn: canvas pixels, draw counters, render stats
+  (`stats.drawnNodes`, `renderMs`), `TileMap.drawnChunks`, `debugDraw` counts.
+
 ## Seeds and determinism
 
 - A test game reseeds the shared `rng` (`seed`, default 1) and runs a fixed 1/60 s step, so the same test is the
@@ -124,6 +136,34 @@ DPR 2 for screenshots you want to inspect closely and for pixel assertions at ex
   `const r = new Rng(11); r.float(40, 670)`.
 - The CLIs use `--seed <n>` (default 1) for both headless and browser shots.
 
+## Balance tests over many seeds: sweepSeeds
+
+One seed proves little about difficulty. Run a bot over several seeds and assert on the median (or p10 / p90), with
+every seed's value in the failure message. `sweepSeeds` from `@engine/testing` runs `run(seed)` once per seed, one
+after another (test games share the platform and rng, so never in parallel), sync or async:
+
+```ts
+import { formatSweep, sweepSeeds } from '@engine/testing';
+
+it('un-upgraded bots kill a handful of enemies', async () => {
+  const r = await sweepSeeds({ from: 1, count: 6 }, (seed) => {   // or an explicit list: [1, 2, 3, 4, 5, 6]
+    const m = new BattleModel({ seed });
+    while (m.state === 'playing' && m.time < 400) botStep(m);
+    return { kills: m.score, time: Math.round(m.time) };          // one number, or several metrics of one run
+  });
+  expect(r.kills.median, formatSweep(r)).toBeGreaterThanOrEqual(6);
+  expect(r.time.p90, formatSweep(r)).toBeLessThanOrEqual(180);
+});
+```
+
+- A number per seed gives one `SweepStats`: `{ seeds, values, min, max, mean, median, p10, p90 }` (`values[i]`
+  belongs to `seeds[i]`; median / percentiles interpolate linearly, so the median of 6 values is the mean of the
+  3rd and 4th). An object per seed gives one `SweepStats` per key, all from the same runs.
+- `formatSweep(stats)` is one line: `median 8 (p10 6.5, p90 10.5, min 6, max 12, mean 8.33) over 6 seeds [1:8 2:6
+  3:12 ...]`; for metric objects `kills: ... | time: ...`.
+- The run can be a whole test game: `async (seed) => { t = await createTestGame({ app, params: { seed }, render:
+  'none' }); ...; t.destroy(); return score; }`. Prefer pure-model bots when the rules allow it: no scene, no UI.
+
 ## Playing a game inside a test
 
 Keep rules pure (model objects) and assert on the model; use taps only to drive it. The drop loop of
@@ -131,7 +171,7 @@ Keep rules pure (model objects) and assert on the model; use taps only to drive 
 
 ```ts
 it('drops where the player taps and merges fruits', async () => {
-  t = await createTestGame({ app, device: 'iphone-14', scene: 'play', params: { seed: 3 } });
+  t = await createTestGame({ app, device: 'iphone-14', scene: 'play', params: { seed: 3 }, render: 'none' });
   const scene = t.scene as PlayScene;
   const jar = t.get('#jar');
   const rng = new Rng(11);
@@ -144,7 +184,7 @@ it('drops where the player taps and merges fruits', async () => {
   }
   expect(scene.model.drops).toBe(drops);
   expect(scene.model.merges).toBeGreaterThan(5);
-}, 60_000);
+});
 ```
 
 - Convert between spaces with `node.toWorld(x, y)` / `node.toLocal(x, y)`; tap targets are stage points.
@@ -194,18 +234,27 @@ storage and a best score does not leak into the next test; pending debounced wri
 reset to the default dark theme (the app's `boot()` sets its own again) and the rng is reseeded.
 
 Not reset, by design: the texture registry and art/SVG caches (textures are platform-independent in Node and
-re-baking would be slow), `Game.current` (points at the newest game), the modal z-order counter, and module-level
+re-baking would be slow), sounds the AudioManager synthesized from a library (deterministic, shared per definition
+object), `Game.current` (points at the newest game), the modal z-order counter, and module-level
 state in your own game code: reset that in `beforeEach` or keep it inside scenes. Vitest runs each test file in its
 own module context, so leaks can only happen between tests of the same file. Always `destroy()` in `afterEach`.
 
 ## Timeouts and speed
 
-- Vitest's default timeout is 5 s per test, and files run in parallel with other workers on the same machine.
-  Long simulations need an explicit timeout: `it('...', async () => { ... }, 30_000)`.
-- Keep the default `render: 'last'`; use `render: 'none'` and `pixelRatio: 1` for long simulations; advance in
+- `vitest.config.ts` sets one budget for everything: `testTimeout` and `hookTimeout` of 30 s, about 7x the slowest
+  play-through, because parallel files and other agents on the same machine slow tests down 3-5x. Don't add
+  per-test timeouts (`it(..., 60_000)`); if a test gets near a few seconds, make it cheaper.
+- Files run in worker threads (`pool: 'threads'`, much faster to start than forked processes on Windows), each file
+  isolated (`isolate` stays on: the texture registry and other process-wide state would leak between files).
+- Use `render: 'none'` (plus `pixelRatio: 1` without screenshots) for game tests, see Render modes above; advance in
   bigger chunks (`advance(0.9)` instead of many `step(1)` calls); test one device unless the device matters.
+- Apps that synthesize their audio from the library (no rendered files) pay that once per test file, not per test
+  game: the AudioManager shares synthesized PCM between managers. It still shows up as a slow first test.
 - Tests that call `game.update()`/`game.render()` directly bypass the render modes: keep their drawn-frame count
   small (the particle stress test draws 30 frames and only updates the rest).
+- Find slow files and tests: `pnpm exec vitest run --reporter=json --outputFile=$env:TEMP\vitest.json`, then sort
+  `testResults[].endTime - startTime` and `assertionResults[].duration`. Profile a flow outside Vitest with
+  `node --cpu-prof --import tsx script.ts` (Vitest workers exit before a `--cpu-prof` profile is written).
 - When an unrelated test times out under load, rerun that file alone (`npx vitest run path`) before judging.
 
 ## CLI reference: pnpm shot and pnpm shot:browser
@@ -225,7 +274,7 @@ Both tools share one parser (`tools/shot/args.ts`). An unknown option prints the
 | `--seconds <n>` | simulated, `0.3` | real time, `0.5` | time before the shot |
 | `--seed <n>` | yes | yes (`?seed=`) | `1` |
 | `--input engine\|touch\|mouse` | engine/touch (same) | all three | `engine` |
-| `--out <file>` | yes | yes | `.shots/<app>-<scene>-<device>.png` / `.shots/browser-<scene>-<device>.png` |
+| `--out <file>` | yes | yes | `.shots/<app>-<scene>-<device>.png` / `.shots/browser-<scene>-<device>.png`; with several devices one file each, the device before the extension (`x.png` -> `x-iphone-se.png`) |
 | `--scale css\|device\|<n>` | all | `css`, `device` | `css` (CSS px) |
 | `--dump` | yes | yes | print the node tree |
 | `--lint` | yes | yes | print UI lint; exit 1 on errors |
@@ -239,6 +288,7 @@ Examples:
 ```powershell
 pnpm shot --scene play --tap 375,900 --wait 1 --dump
 pnpm shot --app sandbox --scene ui-menu --params '{"open":"settings"}' --device all --lint
+pnpm shot --app archer --scene play --device "iphone-se-land,ipad-land" --out .shots/hud.png   # hud-iphone-se-land.png, hud-ipad-land.png
 pnpm shot:browser --scene title --tap "#start" --wait 0.5 --input touch
 ```
 

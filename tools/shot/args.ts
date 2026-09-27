@@ -1,6 +1,6 @@
 // Shared command line of `pnpm shot` (headless, run.ts) and `pnpm shot:browser` (real browser, browser.ts):
 // same options, same defaults where both can support them, one usage text generated from OPTIONS.
-import { basename, resolve } from 'node:path';
+import { basename, extname, resolve } from 'node:path';
 import { defaultDevice, devices, devicesFor } from '../../engine/testing/devices';
 import { readAppMeta } from '../build/config';
 import { defaultApp } from '../common/app';
@@ -173,7 +173,9 @@ const OPTIONS: OptionDef[] = [
   {
     flag: '--out',
     arg: '<file>',
-    help: 'output path (single device only; default .shots/<app>-<scene>-<device>.png, browser: .shots/browser-<scene>-<device>.png)',
+    help:
+      'output path; with several devices the device name goes before the extension (x.png -> x-iphone-se.png, ' +
+      'x-ipad.png). Default .shots/<app>-<scene>-<device>.png, browser: .shots/browser-<scene>-<device>.png',
     apply: (a, v) => (a.out = v),
   },
   {
@@ -262,7 +264,6 @@ export function parseShotArgs(argv: readonly string[], tool: ShotTool): ShotArgs
   const orientation = readAppMeta(resolve(a.app)).orientation;
   if (!devicesGiven) a.devices = [defaultDevice(orientation)];
   else if (a.devices.includes('all')) a.devices = devicesFor(orientation);
-  if (a.out && a.devices.length > 1) throw new UsageError('--out needs a single --device');
   return a;
 }
 
@@ -323,8 +324,15 @@ export function shotArgsOrExit(argv: readonly string[], tool: ShotTool): ShotArg
   }
 }
 
-/** Default output path of one shot. */
+/**
+ * Output path of one shot. `--out` is used as given for a single device; with several devices the device name goes
+ * before the extension, so every device gets its own file (`--out .shots/x.png` -> `.shots/x-iphone-se.png`, ...).
+ */
 export function shotFile(tool: ShotTool, a: ShotArgs, scene: string, device: string): string {
-  if (a.out && a.devices.length === 1) return a.out;
+  if (a.out) {
+    if (a.devices.length === 1) return a.out;
+    const ext = extname(a.out);
+    return `${a.out.slice(0, a.out.length - ext.length)}-${device}${ext}`;
+  }
   return tool === 'shot' ? `.shots/${basename(resolve(a.app))}-${scene}-${device}.png` : `.shots/browser-${scene}-${device}.png`;
 }

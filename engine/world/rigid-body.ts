@@ -1,4 +1,5 @@
 import type { Node } from '../scene/node';
+import type { RigidJoint } from './rigid-joint';
 import { rigidShapeMass, type RigidShape } from './rigid-shapes';
 import type { RigidWorld } from './rigid-world';
 
@@ -39,6 +40,11 @@ export interface RigidBodyOptions {
   category?: number;
   /** Categories it collides with; both sides must accept each other. Default all (-1). */
   mask?: number;
+  /**
+   * Collision group (Box2D groupIndex): two bodies with the same non-zero group always collide when it is positive
+   * and never when it is negative (e.g. all parts of one ragdoll), overriding category/mask. Default 0.
+   */
+  group?: number;
   /** Default true. */
   allowSleep?: boolean;
   /** Start asleep (pre-settled stacks). Default true = awake. */
@@ -82,8 +88,11 @@ export class RigidBody {
   sensor: boolean;
   category: number;
   mask: number;
+  group: number;
   allowSleep: boolean;
   sleeping = false;
+  /** Joints attached to this body (maintained by the world). */
+  readonly joints: RigidJoint[] = [];
   /** Seconds this body has been slow enough to sleep. */
   sleepTime = 0;
   userData: unknown;
@@ -131,6 +140,7 @@ export class RigidBody {
     this.sensor = opts.sensor ?? false;
     this.category = opts.category ?? 1;
     this.mask = opts.mask ?? -1;
+    this.group = opts.group ?? 0;
     this.allowSleep = opts.allowSleep ?? true;
     this.sleeping = this.type === 'dynamic' && opts.awake === false;
     this.userData = opts.userData ?? null;
@@ -237,11 +247,12 @@ export class RigidBody {
     return this;
   }
 
-  /** Wakes a sleeping dynamic body (resets its sleep timer). */
+  /** Wakes a sleeping dynamic body (resets its sleep timer) and the sleeping bodies jointed to it. */
   wake(): void {
     if (this.sleeping) {
       this.sleeping = false;
       this.sleepTime = 0;
+      for (const j of this.joints) j.other(this).wake();
     }
   }
 
@@ -317,6 +328,7 @@ export class RigidBody {
     if (this.sleeping) s += ' sleeping';
     if (this.sensor) s += ' sensor';
     if (this.category !== 1 || this.mask !== -1) s += ` cat=${this.category} mask=${this.mask}`;
+    if (this.group !== 0) s += ` group=${this.group}`;
     return s;
   }
 }

@@ -133,6 +133,7 @@ export {
   lintUI,
   formatLint,
   drawUIBounds,
+  keepClearZones,
   uiNodeName,
   UI_LINT_RULES,
   type UIInspectNode,
@@ -141,5 +142,16 @@ export {
   type UILintRule,
   type UILintIssue,
   type UILintOptions,
+  type UIKeepClearZone,
+  type UIKeepClearInput,
   type UIBoundsOptions,
 } from './inspect';
+export {
+  convertPoint,
+  nodeRect,
+  followNode,
+  pinToNode,
+  type FollowNodeOptions,
+  type FollowRect,
+  type PinToNodeOptions,
+} from './follow';

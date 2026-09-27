@@ -16,33 +16,14 @@ export function texturePixels(tex: Texture): { data: Uint8ClampedArray; width: n
   return { data: img.data, width: s.width, height: s.height };
 }
 
-/**
- * Colours a texture. 'fill' (default) paints `color` over opaque pixels with `amount` opacity (flash / tint);
- * 'multiply' multiplies the colours (keeps shading; needs globalCompositeOperation 'multiply').
- */
-export function tintTexture(tex: Texture, color: Color, opts: { amount?: number; mode?: 'fill' | 'multiply' } = {}): Texture {
+/** Solid single-colour copy of the texture's shape (shadows, hit flashes, locked items). Uncached, unlike tintTexture. */
+export function silhouetteTexture(tex: Texture, color: Color = '#000000'): Texture {
   return bakeLike(tex, tex.width, tex.height, (ctx) => {
     tex.draw(ctx, 0, 0);
-    if (opts.mode === 'multiply') {
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = opts.amount ?? 1;
-      ctx.fillStyle = color;
-      ctx.fillRect(0, 0, tex.width, tex.height);
-      ctx.globalAlpha = 1;
-      ctx.globalCompositeOperation = 'destination-in';
-      tex.draw(ctx, 0, 0);
-    } else {
-      ctx.globalCompositeOperation = 'source-atop';
-      ctx.globalAlpha = opts.amount ?? 1;
-      ctx.fillStyle = color;
-      ctx.fillRect(0, 0, tex.width, tex.height);
-    }
+    ctx.globalCompositeOperation = 'source-atop';
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, tex.width, tex.height);
   });
-}
-
-/** Solid single-colour copy of the texture's shape (shadows, hit flashes, locked items). */
-export function silhouetteTexture(tex: Texture, color: Color = '#000000'): Texture {
-  return tintTexture(tex, color, { amount: 1 });
 }
 
 /** Adds an outline around opaque pixels; the result is `width` px larger on every side. */

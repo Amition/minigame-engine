@@ -231,5 +231,5 @@ describe('sandbox debug-overlay scene', () => {
     await t.tap('#back');
     expect(t.scene?.sceneName).toBe('home');
     expect(getDebugOverlay(t.game)).toBeNull();
-  }, 60_000);
+  });
 });

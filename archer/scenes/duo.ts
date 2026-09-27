@@ -1,6 +1,7 @@
 import {
   createInputActions,
   fixedUpdate,
+  followNode,
   isAudioMuted,
   mountScreen,
   Node,
@@ -21,6 +22,7 @@ import {
   ui,
   wait,
   type AimInfo,
+  type FollowRect,
   type Label,
   type Rect,
   type UIImage,
@@ -33,7 +35,7 @@ import { addSkulls, archerSave, currentStats, loadout } from '../save';
 import { J } from '../types';
 import { BattleFx } from './battle-fx';
 import { AimIndicator, AppleLayer, ArrowLayer, Backdrop, FighterNode, PlatformNode, StatBar, TrajectoryPreview } from './battle-view';
-import { DEAD_ZONE, PULL_DISTANCE, TOWER_HUD_W } from './play';
+import { DEAD_ZONE, PULL_DISTANCE, TOWER_HUD_AREA } from './play';
 
 export type DuoMode = 'versus' | 'coop';
 
@@ -95,6 +97,8 @@ export class DuoScene extends Scene {
   private pauseButton!: Node;
   private readonly fighterNodes = new Map<Fighter, FighterNode>();
   private readonly platformNodes = new Map<Platform, PlatformNode>();
+  /** Face of each human's tower below the archer, scene coordinates (bars, and the jump button in the column). */
+  private readonly towerAreas: FollowRect[] = [];
   private readonly fx = new Rng(11);
   private halted = false;
   private shownSkulls = 0;
@@ -120,6 +124,7 @@ export class DuoScene extends Scene {
     this.field.add(new ArrowLayer(() => this.model.arrows, { id: 'arrows' }));
     const previews = this.model.humans.map((h) => this.field.add(new TrajectoryPreview({ id: `trajectory-p${h.who + 1}`, visible: false })));
     this.fxLayer = this.field.add(new Node({ id: 'fx' }));
+    this.syncWorld();
 
     const zones = this.model.humans.map((h) => this.add(new Node({ id: `aim-p${h.who + 1}`, tags: ['lint-surface'] })));
     this.pads = this.model.humans.map((h, i) => this.buildPad(h, zones[i]!, previews[i]!));
@@ -188,17 +193,6 @@ export class DuoScene extends Scene {
     return Math.min(this.game.safe.y + this.game.safe.h, this.height);
   }
 
-  /** Face of human `who`'s tower below the archer, scene coordinates (bars, and the jump button in the column). */
-  private towerRect(who: Who): Rect {
-    const { field } = this.layout;
-    const t = this.model.human(who).tower;
-    const cx = field.x + t.x * field.scale;
-    const top = field.y + t.standY * field.scale;
-    const w = Math.max(TOWER_HUD_W, t.w * field.scale - 20);
-    const bottom = this.safeBottom - 8;
-    return { x: cx - w / 2, y: top + 18, w, h: Math.max(160, bottom - top - 18) };
-  }
-
   /**
    * Co-op P2 stands on the front tower, inside P1's half: its jump button and arrow switch sit in the bottom-right
    * corner of its own half instead.
@@ -224,7 +218,7 @@ export class DuoScene extends Scene {
       const j = this.cornerJumpRect();
       return { x: j.x - 14 - SWAP_W, y: j.y + (JUMP_H - SWAP_H) / 2, w: SWAP_W, h: SWAP_H };
     }
-    const r = this.towerRect(who);
+    const r = this.towerAreas[who]!();
     if (this.mode === 'coop') return { x: r.x + (r.w - SWAP_W) / 2, y: r.y + JUMP_TOP + JUMP_H + 12, w: SWAP_W, h: SWAP_H };
     const y = r.y + JUMP_TOP + (JUMP_H - SWAP_H) / 2;
     return { x: who === 0 ? r.x - 14 - SWAP_W : r.x + r.w + 14, y, w: SWAP_W, h: SWAP_H };
@@ -260,7 +254,8 @@ export class DuoScene extends Scene {
     const corner = who === 1 && this.p2Corner;
     const hud = this.add(new Node({ id: `tower-hud-p${who + 1}` }));
     const bars: Node[] = [ui.node(hp, { width: BAR_W, height: BAR_H }), ui.node(stamina, { width: BAR_W, height: BAR_H })];
-    mountScreen(hud, ui.column({ align: 'center', gap: 8 }, corner ? bars : [...bars, ui.spacer(4), jump]), { area: () => this.towerRect(who) });
+    const area = (this.towerAreas[who] = followNode(this.platformNodes.get(human.tower)!, { ...TOWER_HUD_AREA, space: this }));
+    mountScreen(hud, ui.column({ align: 'center', gap: 8 }, corner ? bars : [...bars, ui.spacer(4), jump]), { area });
     if (corner) {
       mountScreen(
         this.add(new Node({ id: 'controls-p2' })),
@@ -392,29 +387,7 @@ export class DuoScene extends Scene {
 
   private sync(): void {
     const m = this.model;
-    const alive = new Set<Fighter>(m.fighters);
-    for (const [f, n] of this.fighterNodes) {
-      if (!alive.has(f)) {
-        n.destroy();
-        this.fighterNodes.delete(f);
-      }
-    }
-    for (const f of m.fighters) {
-      if (!this.fighterNodes.has(f)) this.fighterNodes.set(f, this.fighterLayer.add(new FighterNode(f, { id: f.human ? `p${f.human.who + 1}` : '' })));
-    }
-    const plats = new Set<Platform>(m.platforms);
-    for (const [p, n] of this.platformNodes) {
-      if (!plats.has(p)) {
-        n.destroy();
-        this.platformNodes.delete(p);
-      }
-    }
-    for (const p of m.platforms) {
-      if (this.platformNodes.has(p)) continue;
-      const owner = m.humans.find((h) => h.tower === p);
-      this.platformNodes.set(p, this.platformLayer.add(new PlatformNode(p, { id: owner ? `tower-p${owner.who + 1}` : '' })));
-    }
-
+    this.syncWorld();
     for (const p of this.pads) {
       const h = p.human;
       const f = h.fighter;
@@ -436,6 +409,33 @@ export class DuoScene extends Scene {
         p.indicator.power = f.draw;
       }
       if (p.swapImage) p.swapImage.src = ART_KEYS.arrow(h.selected);
+    }
+  }
+
+  /** Fighter and platform nodes for the model's current bodies. */
+  private syncWorld(): void {
+    const m = this.model;
+    const alive = new Set<Fighter>(m.fighters);
+    for (const [f, n] of this.fighterNodes) {
+      if (!alive.has(f)) {
+        n.destroy();
+        this.fighterNodes.delete(f);
+      }
+    }
+    for (const f of m.fighters) {
+      if (!this.fighterNodes.has(f)) this.fighterNodes.set(f, this.fighterLayer.add(new FighterNode(f, { id: f.human ? `p${f.human.who + 1}` : '' })));
+    }
+    const plats = new Set<Platform>(m.platforms);
+    for (const [p, n] of this.platformNodes) {
+      if (!plats.has(p)) {
+        n.destroy();
+        this.platformNodes.delete(p);
+      }
+    }
+    for (const p of m.platforms) {
+      if (this.platformNodes.has(p)) continue;
+      const owner = m.humans.find((h) => h.tower === p);
+      this.platformNodes.set(p, this.platformLayer.add(new PlatformNode(p, { id: owner ? `tower-p${owner.who + 1}` : '' })));
     }
   }
 
