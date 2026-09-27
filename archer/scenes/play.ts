@@ -1,5 +1,6 @@
 import { Node, Scene, type Ctx2D } from '@engine';
 import { drawBackdrop } from '../art/index';
+import { screenLayout } from '../layout';
 import { mountMenu } from './menu';
 
 export interface PlayParams {
@@ -22,7 +23,7 @@ export class PlayScene extends Scene {
         }
       })({ id: 'backdrop', width: w, height: h }),
     );
-    const safe = this.game.safe;
-    mountMenu(this, { zone: { x: safe.x, y: safe.y, w: w * 0.3, h: safe.h }, hudBottom: safe.y + 60 });
+    const { zone, hudBottom } = screenLayout(this.game.view, this.game.safe);
+    mountMenu(this, { zone, hudBottom });
   }
 }
