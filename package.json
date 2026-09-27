@@ -10,6 +10,7 @@
     "test:watch": "vitest",
     "check": "pnpm typecheck && pnpm test",
     "shot": "tsx tools/shot/run.ts",
+    "shot:browser": "tsx tools/shot/browser.ts",
     "dev": "tsx tools/dev/server.ts",
     "build": "tsx tools/build/build.ts",
     "build:web": "tsx tools/build/build.ts --target web",

@@ -1,0 +1,541 @@
+import type { Insets } from '../core/math';
+import type { ImageSource, Surface } from '../gfx/types';
+import type {
+  AdService,
+  AudioBackend,
+  AudioInstance,
+  KeyValueStorage,
+  LoginResult,
+  Platform,
+  PlayOptions,
+  RawTouch,
+  RawTouchEvent,
+  ScreenInfo,
+  ShareOptions,
+  TouchPhase,
+} from './types';
+
+export interface WebPlatformOptions {
+  /** Canvas to render into (default: `canvas#game`, created and appended to body when missing). */
+  canvas?: HTMLCanvasElement;
+  /** URL prefix for loadImage/readText/audio paths (default 'assets/'). */
+  assetBase?: string;
+  /** localStorage key prefix (default 'engine:'). */
+  storagePrefix?: string;
+  /** Overrides the CSS env(safe-area-inset-*) probe (browser screenshots emulate device insets with it). */
+  safeInsets?: Partial<Insets>;
+  /** Duration of the simulated rewarded ad (default 2 s). */
+  adSeconds?: number;
+}
+
+export const WEB_FONT = '"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
+
+const noop = () => {};
+
+class Listeners<T> {
+  private readonly set = new Set<(v: T) => void>();
+  add(cb: (v: T) => void): () => void {
+    this.set.add(cb);
+    return () => this.set.delete(cb);
+  }
+  emit(v: T): void {
+    for (const cb of [...this.set]) cb(v);
+  }
+}
+
+function joinUrl(base: string, path: string): string {
+  if (/^([a-z][a-z0-9+.-]*:|\/)/i.test(path)) return path;
+  return base + path.replace(/^\.\//, '');
+}
+
+// ------------------------------------------------------------------ storage
+
+class WebStorage implements KeyValueStorage {
+  private readonly mem = new Map<string, string>();
+  private readonly ls: Storage | null;
+
+  constructor(private readonly prefix: string) {
+    let ls: Storage | null = null;
+    try {
+      ls = window.localStorage;
+      ls.getItem(prefix);
+    } catch {
+      ls = null;
+    }
+    this.ls = ls;
+  }
+
+  get(key: string): string | null {
+    if (!this.ls) return this.mem.get(key) ?? null;
+    return this.ls.getItem(this.prefix + key);
+  }
+
+  set(key: string, value: string): void {
+    if (!this.ls) {
+      this.mem.set(key, value);
+      return;
+    }
+    try {
+      this.ls.setItem(this.prefix + key, value);
+    } catch (e) {
+      console.warn(`[storage] set "${key}" failed`, e);
+    }
+  }
+
+  remove(key: string): void {
+    this.mem.delete(key);
+    this.ls?.removeItem(this.prefix + key);
+  }
+
+  keys(): string[] {
+    if (!this.ls) return [...this.mem.keys()];
+    const out: string[] = [];
+    for (let i = 0; i < this.ls.length; i++) {
+      const k = this.ls.key(i);
+      if (k !== null && k.startsWith(this.prefix)) out.push(k.slice(this.prefix.length));
+    }
+    return out;
+  }
+}
+
+// ------------------------------------------------------------------ audio
+
+type AudioCtor = typeof AudioContext;
+
+const STOPPED: AudioInstance = { stop: noop, setVolume: noop, playing: false };
+
+/**
+ * WebAudio backend: fetch + decodeAudioData, one BufferSource + GainNode per play. The context starts
+ * suspended until the first user gesture (autoplay policy), which also unlocks iOS.
+ */
+export class WebAudio implements AudioBackend {
+  private ctx: AudioContext | null = null;
+  private master: GainNode | null = null;
+  private readonly buffers = new Map<string, AudioBuffer>();
+  private readonly active = new Set<{ src: AudioBufferSourceNode; stop(): void }>();
+  private readonly warned = new Set<string>();
+  private hidden = false;
+  private unlockBound = false;
+
+  constructor(private readonly base: string) {}
+
+  /** The AudioContext, created on first use (null when WebAudio is unavailable). */
+  context(): AudioContext | null {
+    if (this.ctx) return this.ctx;
+    const w = window as unknown as { AudioContext?: AudioCtor; webkitAudioContext?: AudioCtor };
+    const Ctor = w.AudioContext ?? w.webkitAudioContext;
+    if (!Ctor) return null;
+    try {
+      this.ctx = new Ctor();
+    } catch {
+      return null;
+    }
+    this.master = this.ctx.createGain();
+    this.master.connect(this.ctx.destination);
+    this.bindUnlock();
+    return this.ctx;
+  }
+
+  async load(key: string, src: string): Promise<void> {
+    const ctx = this.context();
+    if (!ctx) return;
+    const url = joinUrl(this.base, src);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`failed to load audio ${url}: HTTP ${res.status}`);
+    const data = await res.arrayBuffer();
+    const buf = await new Promise<AudioBuffer>((resolve, reject) => {
+      // Callback form keeps old Safari (no promise-returning decodeAudioData) working.
+      const p = ctx.decodeAudioData(data, resolve, (e) => reject(new Error(`failed to decode audio ${url}: ${e}`)));
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    });
+    this.buffers.set(key, buf);
+  }
+
+  async loadPcm(key: string, pcm: Float32Array, sampleRate: number): Promise<void> {
+    const ctx = this.context();
+    if (!ctx) return;
+    const buf = ctx.createBuffer(1, Math.max(1, pcm.length), sampleRate);
+    buf.getChannelData(0).set(pcm);
+    this.buffers.set(key, buf);
+  }
+
+  isLoaded(key: string): boolean {
+    return this.buffers.has(key);
+  }
+
+  play(key: string, opts: PlayOptions = {}): AudioInstance {
+    const ctx = this.ctx;
+    const buf = this.buffers.get(key);
+    if (!ctx || !buf || !this.master) {
+      if (!this.warned.has(key)) {
+        this.warned.add(key);
+        console.warn(`[audio] "${key}" ${ctx ? 'is not loaded' : 'cannot play: WebAudio unavailable'}`);
+      }
+      return STOPPED;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = !!opts.loop;
+    if (opts.rate !== undefined) src.playbackRate.value = opts.rate;
+    const gain = ctx.createGain();
+    gain.gain.value = opts.volume ?? 1;
+    src.connect(gain);
+    gain.connect(this.master);
+    let playing = true;
+    const entry = {
+      src,
+      stop: () => {
+        if (!playing) return;
+        playing = false;
+        this.active.delete(entry);
+        try {
+          src.stop();
+        } catch {
+          // already stopped
+        }
+        src.disconnect();
+        gain.disconnect();
+      },
+    };
+    src.onended = () => entry.stop();
+    this.active.add(entry);
+    src.start();
+    return {
+      stop: () => entry.stop(),
+      setVolume: (v: number) => {
+        gain.gain.value = v;
+      },
+      get playing() {
+        return playing;
+      },
+    };
+  }
+
+  stopAll(): void {
+    for (const e of [...this.active]) e.stop();
+  }
+
+  suspend(): void {
+    this.hidden = true;
+    void this.ctx?.suspend().catch(noop);
+  }
+
+  resume(): void {
+    this.hidden = false;
+    void this.ctx?.resume().catch(noop);
+  }
+
+  private bindUnlock(): void {
+    if (this.unlockBound) return;
+    this.unlockBound = true;
+    const events = ['touchstart', 'touchend', 'mousedown', 'pointerdown', 'keydown'];
+    const unlock = () => {
+      const ctx = this.ctx;
+      if (!ctx || this.hidden) return;
+      void ctx.resume().catch(noop);
+      // iOS needs a sound started inside the gesture.
+      const src = ctx.createBufferSource();
+      src.buffer = ctx.createBuffer(1, 1, 22050);
+      src.connect(ctx.destination);
+      src.start(0);
+      if (ctx.state === 'running') for (const e of events) window.removeEventListener(e, unlock, true);
+    };
+    for (const e of events) window.addEventListener(e, unlock, true);
+  }
+}
+
+// ------------------------------------------------------------------ ads
+
+/** Dev stand-in for mini-game ads: a DOM overlay. Rewarded resolves true after ~2 s; interstitial on close. */
+class SimulatedAds implements AdService {
+  constructor(private readonly seconds: number) {}
+
+  rewarded(adUnitId: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const el = overlay(`Ad (simulated)\nrewarded ${adUnitId || '(no unit id)'}`);
+      const label = el.querySelector('span')!;
+      let left = Math.ceil(this.seconds);
+      label.textContent = `${left}`;
+      const timer = setInterval(() => {
+        left--;
+        label.textContent = `${Math.max(0, left)}`;
+      }, 1000);
+      setTimeout(() => {
+        clearInterval(timer);
+        el.remove();
+        resolve(true);
+      }, this.seconds * 1000);
+    });
+  }
+
+  interstitial(adUnitId: string): Promise<void> {
+    return new Promise((resolve) => {
+      const el = overlay(`Ad (simulated)\ninterstitial ${adUnitId || '(no unit id)'}`);
+      const label = el.querySelector('span')!;
+      label.textContent = '× close';
+      label.style.cursor = 'pointer';
+      let done = false;
+      const close = () => {
+        if (done) return;
+        done = true;
+        el.remove();
+        resolve();
+      };
+      label.addEventListener('click', close);
+      // Auto-close so unattended runs (browser shots) never hang on an ad.
+      setTimeout(close, 4000);
+    });
+  }
+}
+
+function overlay(text: string): HTMLDivElement {
+  const el = document.createElement('div');
+  el.style.cssText =
+    'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;align-items:center;' +
+    'justify-content:center;gap:16px;background:rgba(0,0,0,.88);color:#fff;font:600 20px/1.4 sans-serif;' +
+    'white-space:pre-line;text-align:center;touch-action:none';
+  el.textContent = text;
+  const span = document.createElement('span');
+  span.style.cssText = 'padding:6px 16px;border:1px solid #fff8;border-radius:16px;font-size:16px';
+  el.appendChild(span);
+  document.body.appendChild(el);
+  return el;
+}
+
+// ------------------------------------------------------------------ platform
+
+/**
+ * Browser platform for dev and testing: full-window canvas, touch + mouse input (mouse is pointer 0, touches are
+ * identifier + 1), localStorage, WebAudio, simulated ads.
+ */
+export class WebPlatform implements Platform {
+  readonly name = 'web' as const;
+  readonly screen: ScreenInfo = { width: 0, height: 0, pixelRatio: 1, safeInsets: { top: 0, right: 0, bottom: 0, left: 0 } };
+  readonly canvas: Surface;
+  readonly fontFamily = WEB_FONT;
+  readonly storage: KeyValueStorage;
+  readonly audio: WebAudio;
+  readonly ads: AdService;
+  readonly element: HTMLCanvasElement;
+
+  private readonly base: string;
+  private readonly probe: HTMLDivElement;
+  private readonly touchCbs = new Listeners<RawTouchEvent>();
+  private readonly showCbs = new Listeners<void>();
+  private readonly hideCbs = new Listeners<void>();
+  private readonly resizeCbs = new Listeners<void>();
+
+  constructor(private readonly opts: WebPlatformOptions = {}) {
+    const base = opts.assetBase ?? 'assets/';
+    this.base = base === '' || base.endsWith('/') ? base : base + '/';
+    let el = opts.canvas ?? (document.getElementById('game') as HTMLCanvasElement | null);
+    if (!el || el.tagName !== 'CANVAS') {
+      el = document.createElement('canvas');
+      el.id = 'game';
+      document.body.appendChild(el);
+    }
+    this.element = el;
+    this.canvas = el as unknown as Surface;
+    this.storage = new WebStorage(opts.storagePrefix ?? 'engine:');
+    this.audio = new WebAudio(this.base);
+    this.ads = new SimulatedAds(opts.adSeconds ?? 2);
+
+    this.probe = document.createElement('div');
+    this.probe.style.cssText =
+      'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
+      'padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)';
+    document.body.appendChild(this.probe);
+
+    this.lockPage();
+    let last = this.measure();
+    this.bindInput();
+
+    const onResize = () => {
+      const next = this.measure();
+      if (next === last) return;
+      last = next;
+      this.resizeCbs.emit();
+    };
+    window.addEventListener('resize', onResize);
+    // iOS Safari updates innerWidth/innerHeight only some time after orientationchange.
+    window.addEventListener('orientationchange', () => {
+      onResize();
+      setTimeout(onResize, 300);
+    });
+    window.visualViewport?.addEventListener('resize', onResize);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.hideCbs.emit();
+      else this.showCbs.emit();
+    });
+  }
+
+  createCanvas(width: number, height: number): Surface {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil(width));
+    c.height = Math.max(1, Math.ceil(height));
+    return c as unknown as Surface;
+  }
+
+  loadImage(path: string): Promise<ImageSource> {
+    const url = joinUrl(this.base, path);
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error(`failed to load image ${url}`));
+      img.src = url;
+    });
+  }
+
+  async readText(path: string): Promise<string> {
+    const url = joinUrl(this.base, path);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`failed to read ${url}: HTTP ${res.status}`);
+    return res.text();
+  }
+
+  now(): number {
+    return performance.now();
+  }
+
+  requestFrame(cb: (timeMs: number) => void): number {
+    return requestAnimationFrame(cb);
+  }
+
+  cancelFrame(id: number): void {
+    cancelAnimationFrame(id);
+  }
+
+  onTouch(cb: (e: RawTouchEvent) => void): () => void {
+    return this.touchCbs.add(cb);
+  }
+
+  onShow(cb: () => void): () => void {
+    return this.showCbs.add(cb);
+  }
+
+  onHide(cb: () => void): () => void {
+    return this.hideCbs.add(cb);
+  }
+
+  onResize(cb: () => void): () => void {
+    return this.resizeCbs.add(cb);
+  }
+
+  vibrate(kind: 'short' | 'long'): void {
+    try {
+      navigator.vibrate?.(kind === 'short' ? 15 : 400);
+    } catch {
+      // not allowed without a gesture in some browsers
+    }
+  }
+
+  share(opts: ShareOptions): void {
+    console.log('[share]', JSON.stringify(opts));
+  }
+
+  async login(): Promise<LoginResult> {
+    return { ok: true };
+  }
+
+  /** Injects a touch event in screen CSS px, as if it came from the browser (used by automation). */
+  simulateTouch(phase: TouchPhase, touches: RawTouch[]): void {
+    this.touchCbs.emit({ phase, touches });
+  }
+
+  /** Updates `screen` and the canvas CSS size; returns a key that changes whenever the screen does. */
+  private measure(): string {
+    const s = this.screen;
+    s.width = Math.max(1, Math.round(window.innerWidth));
+    s.height = Math.max(1, Math.round(window.innerHeight));
+    s.pixelRatio = window.devicePixelRatio || 1;
+    const cs = getComputedStyle(this.probe);
+    const o = this.opts.safeInsets ?? {};
+    s.safeInsets = {
+      top: o.top ?? (parseFloat(cs.paddingTop) || 0),
+      right: o.right ?? (parseFloat(cs.paddingRight) || 0),
+      bottom: o.bottom ?? (parseFloat(cs.paddingBottom) || 0),
+      left: o.left ?? (parseFloat(cs.paddingLeft) || 0),
+    };
+    const st = this.element.style;
+    st.width = `${s.width}px`;
+    st.height = `${s.height}px`;
+    const i = s.safeInsets;
+    return `${s.width}x${s.height}@${s.pixelRatio}:${i.top},${i.right},${i.bottom},${i.left}`;
+  }
+
+  private lockPage(): void {
+    const root = document.documentElement.style;
+    const body = document.body.style;
+    for (const st of [root, body]) {
+      st.margin = '0';
+      st.padding = '0';
+      st.overflow = 'hidden';
+      st.height = '100%';
+      st.touchAction = 'none';
+      st.overscrollBehavior = 'none';
+      st.userSelect = 'none';
+      st.setProperty('-webkit-user-select', 'none');
+      st.setProperty('-webkit-touch-callout', 'none');
+      st.setProperty('-webkit-tap-highlight-color', 'transparent');
+    }
+    const el = this.element.style;
+    el.display = 'block';
+    el.position = 'fixed';
+    el.left = '0';
+    el.top = '0';
+    el.touchAction = 'none';
+    const prevent = (e: Event) => e.preventDefault();
+    document.addEventListener('touchmove', prevent, { passive: false });
+    document.addEventListener('gesturestart', prevent);
+    document.addEventListener('gesturechange', prevent);
+    document.addEventListener('dblclick', prevent);
+    document.addEventListener('contextmenu', prevent);
+    document.addEventListener('wheel', (e) => e.ctrlKey && e.preventDefault(), { passive: false });
+  }
+
+  private bindInput(): void {
+    const el = this.element;
+    const touch = (phase: TouchPhase) => (e: TouchEvent) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const touches: RawTouch[] = [];
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i]!;
+        touches.push({ id: t.identifier + 1, x: t.clientX - r.left, y: t.clientY - r.top });
+      }
+      if (touches.length) this.touchCbs.emit({ phase, touches });
+    };
+    const opt = { passive: false };
+    el.addEventListener('touchstart', touch('start'), opt);
+    el.addEventListener('touchmove', touch('move'), opt);
+    el.addEventListener('touchend', touch('end'), opt);
+    el.addEventListener('touchcancel', touch('cancel'), opt);
+
+    let down = false;
+    const mouse = (phase: TouchPhase, e: MouseEvent) => {
+      const r = el.getBoundingClientRect();
+      this.touchCbs.emit({ phase, touches: [{ id: 0, x: e.clientX - r.left, y: e.clientY - r.top }] });
+    };
+    el.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      down = true;
+      mouse('start', e);
+    });
+    window.addEventListener('mousemove', (e) => down && mouse('move', e));
+    window.addEventListener('mouseup', (e) => {
+      if (e.button !== 0 || !down) return;
+      down = false;
+      mouse('end', e);
+    });
+    window.addEventListener('blur', () => {
+      if (!down) return;
+      down = false;
+      this.touchCbs.emit({ phase: 'cancel', touches: [{ id: 0, x: 0, y: 0 }] });
+    });
+  }
+}
+
+/** Creates the browser platform. The canvas is sized to the window; Game sets its backing store. */
+export function createWebPlatform(opts: WebPlatformOptions = {}): WebPlatform {
+  return new WebPlatform(opts);
+}

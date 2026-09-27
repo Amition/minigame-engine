@@ -1,0 +1,19 @@
+{
+  "name": "Engine Sandbox",
+  "version": "0.1.0",
+  "orientation": "portrait",
+  "background": "#14161c",
+  "appid": {
+    "wx": "",
+    "tt": "",
+    "tap": ""
+  },
+  "ads": {
+    "wx": { "rewarded": "", "interstitial": "" },
+    "tt": { "rewarded": "", "interstitial": "" },
+    "tap": { "rewarded": "", "interstitial": "" }
+  },
+  "share": {
+    "title": "Engine Sandbox"
+  }
+}
