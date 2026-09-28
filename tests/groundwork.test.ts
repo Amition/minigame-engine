@@ -40,6 +40,13 @@ describe('text wrapping', () => {
   it('wraps latin per word', () => {
     expect(wrapText('hello big world', 90, measure)).toEqual(['hello big', 'world']);
   });
+  it('ends text cut by maxLines with an ellipsis', async () => {
+    t = await createTestGame({ render: 'none' });
+    const label = new Text('A very long label that cannot fit on one line', { wrapWidth: 200, maxLines: 1 });
+    expect(label.truncated).toBe(true);
+    expect(label.lines).toHaveLength(1);
+    expect(label.lines[0]!.endsWith('\u2026')).toBe(true);
+  });
 });
 
 describe('scene graph + input', () => {

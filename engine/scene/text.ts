@@ -16,7 +16,7 @@ export interface TextStyle {
   lineHeight: number;
   /** Wrap width in local units; 0 = no wrapping (single line per '\n'). */
   wrapWidth: number;
-  /** Max lines (0 = unlimited). Overflow is cut and ends with '?'. */
+  /** Max lines (0 = unlimited). Overflow is cut and ends with an ellipsis (U+2026). */
   maxLines: number;
   stroke: { color: Color; width: number } | null;
   shadow: { color: Color; blur: number; x?: number; y?: number } | null;
@@ -177,8 +177,8 @@ function layoutAtSize(text: string, st: TextStyle, wrapWidth: number, fontSize: 
     lines = lines.slice(0, st.maxLines);
     const limit = wrapWidth > 0 ? wrapWidth : Infinity;
     let last = lines[st.maxLines - 1]!;
-    while (last.length > 0 && measure(last + '?') > limit) last = [...last].slice(0, -1).join('');
-    lines[st.maxLines - 1] = last + '?';
+    while (last.length > 0 && measure(last + '\u2026') > limit) last = [...last].slice(0, -1).join('');
+    lines[st.maxLines - 1] = last + '\u2026';
     truncated = true;
   }
   let maxW = 0;
