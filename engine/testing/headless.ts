@@ -7,8 +7,10 @@ import type {
   AdService,
   AudioBackend,
   AudioInstance,
+  AudioLoadHint,
   KeyValueStorage,
   LoginResult,
+  MemoryWarningInfo,
   Platform,
   PlatformKeyEvent,
   PlayOptions,
@@ -50,7 +52,7 @@ export class MemoryStorage implements KeyValueStorage {
 }
 
 export interface AudioLogEntry {
-  action: 'play' | 'stop' | 'stopAll' | 'volume';
+  action: 'play' | 'stop' | 'stopAll' | 'volume' | 'unload';
   key: string;
   opts?: PlayOptions;
   /** Platform clock (ms) when it happened. */
@@ -59,15 +61,43 @@ export interface AudioLogEntry {
 
 /** Records every call so tests can assert which sounds played. */
 export class RecordingAudio implements AudioBackend {
+  /**
+   * Calls in order. Volume ramps (music fades call setVolume every frame) are coalesced: until the next play / stop /
+   * stopAll, further setVolume calls of a sound update its last 'volume' entry (value and time) instead of adding one.
+   */
   readonly log: AudioLogEntry[] = [];
+  /** Beyond this many entries the oldest quarter is dropped (long play-through tests stay bounded). */
+  logLimit = 20_000;
   readonly loaded = new Map<string, string>();
+  /** Load hints by key (the AudioManager streams music: `{ stream: true }`). */
+  readonly hints = new Map<string, AudioLoadHint>();
   readonly pcm = new Map<string, { data: Float32Array; sampleRate: number }>();
   suspended = false;
+  /** Volume entries of this segment may be updated in place; bumped by every other entry and by trimming. */
+  private segment = 0;
 
   constructor(private readonly clock: () => number) {}
 
-  async load(key: string, src: string): Promise<void> {
+  private record(e: AudioLogEntry, coalescable = false): number {
+    if (!coalescable) this.segment++;
+    this.log.push(e);
+    if (this.log.length > this.logLimit) {
+      this.log.splice(0, this.log.length - Math.floor(this.logLimit * 0.75));
+      this.segment++;
+    }
+    return this.segment;
+  }
+
+  async load(key: string, src: string, hint?: AudioLoadHint): Promise<void> {
     this.loaded.set(key, src);
+    if (hint) this.hints.set(key, hint);
+  }
+
+  unload(key: string): void {
+    this.loaded.delete(key);
+    this.hints.delete(key);
+    this.pcm.delete(key);
+    this.record({ action: 'unload', key, time: this.clock() });
   }
 
   async loadPcm(key: string, pcm: Float32Array, sampleRate: number): Promise<void> {
@@ -80,18 +110,25 @@ export class RecordingAudio implements AudioBackend {
   }
 
   play(key: string, opts?: PlayOptions): AudioInstance {
-    this.log.push({ action: 'play', key, ...(opts ? { opts } : {}), time: this.clock() });
+    this.record({ action: 'play', key, ...(opts ? { opts } : {}), time: this.clock() });
     let playing = true;
-    const log = this.log;
-    const clock = this.clock;
+    let vol: (AudioLogEntry & { opts: PlayOptions }) | null = null;
+    let volSegment = -1;
+    const rec = this;
     return {
       stop() {
         if (!playing) return;
         playing = false;
-        log.push({ action: 'stop', key, time: clock() });
+        rec.record({ action: 'stop', key, time: rec.clock() });
       },
       setVolume(v: number) {
-        log.push({ action: 'volume', key, opts: { volume: v }, time: clock() });
+        if (vol && volSegment === rec.segment) {
+          vol.opts.volume = v;
+          vol.time = rec.clock();
+          return;
+        }
+        vol = { action: 'volume', key, opts: { volume: v }, time: rec.clock() };
+        volSegment = rec.record(vol, true);
       },
       get playing() {
         return playing;
@@ -100,7 +137,7 @@ export class RecordingAudio implements AudioBackend {
   }
 
   stopAll(): void {
-    this.log.push({ action: 'stopAll', key: '', time: this.clock() });
+    this.record({ action: 'stopAll', key: '', time: this.clock() });
   }
 
   suspend(): void {
@@ -136,7 +173,10 @@ export class HeadlessPlatform implements Platform {
   /** System language seen by the game; tests may change it before calling detectLocale(). */
   language: string;
   clock = 0;
+  /** triggerGC() calls. */
+  gcCount = 0;
 
+  private memoryCbs = new Set<(info: MemoryWarningInfo) => void>();
   private frameCbs = new Map<number, (t: number) => void>();
   private nextFrameId = 1;
   private touchCbs = new Set<(e: RawTouchEvent) => void>();
@@ -247,6 +287,15 @@ export class HeadlessPlatform implements Platform {
     return this.loginResult;
   }
 
+  onMemoryWarning(cb: (info: MemoryWarningInfo) => void): () => void {
+    this.memoryCbs.add(cb);
+    return () => this.memoryCbs.delete(cb);
+  }
+
+  triggerGC(): void {
+    this.gcCount++;
+  }
+
   // ------------------------------------------------ simulation helpers
 
   /** Injects a raw touch event (screen CSS px). */
@@ -270,6 +319,12 @@ export class HeadlessPlatform implements Platform {
 
   hide(): void {
     for (const cb of [...this.hideCbs]) cb();
+  }
+
+  /** Simulates the host's onMemoryWarning (wx level 5 / 10 / 15 on Android). */
+  memoryWarning(level?: number): void {
+    const info: MemoryWarningInfo = level === undefined ? {} : { level };
+    for (const cb of [...this.memoryCbs]) cb(info);
   }
 
   show(): void {

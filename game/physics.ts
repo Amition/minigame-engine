@@ -94,6 +94,12 @@ const WALL = 400;
 const LINEAR_DAMPING = 0.4;
 const ANGULAR_DAMPING = 1.2;
 
+/** Already part of a merge this step (merges per step are few: a scan beats a Set allocated every step). */
+function paired(merges: readonly MergeContact[], f: FruitBody): boolean {
+  for (let i = 0; i < merges.length; i++) if (merges[i]!.a === f || merges[i]!.b === f) return true;
+  return false;
+}
+
 export class FruitPhysics {
   readonly width: number;
   readonly height: number;
@@ -105,6 +111,8 @@ export class FruitPhysics {
   readonly bodies: FruitBody[] = [];
   private nextId = 1;
   private readonly floor: RigidBody;
+  /** Pre-step velocities (vx, vy per body; vx NaN = asleep), reused every step. */
+  private pre = new Float64Array(64);
 
   constructor(opts: FruitPhysicsOptions) {
     const W = (this.width = opts.width);
@@ -174,14 +182,17 @@ export class FruitPhysics {
     const bodies = this.bodies;
     const grow = dt / Math.max(1e-6, this.growTime);
     const g = this.world.gravityY;
-    const pre: number[] = [];
-    for (const b of bodies) {
+    if (this.pre.length < bodies.length * 2) this.pre = new Float64Array(bodies.length * 4);
+    const pre = this.pre;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (b.r < b.targetR) {
         b.r = Math.min(b.targetR, b.r + b.targetR * grow);
         b.body.setShape(rigidCircle(b.r));
       }
       const body = b.body;
-      pre.push(body.sleeping ? NaN : body.vx, body.vy);
+      pre[i * 2] = body.sleeping ? NaN : body.vx;
+      pre[i * 2 + 1] = body.vy;
     }
     this.world.step(dt);
     this.time += dt;
@@ -193,8 +204,9 @@ export class FruitPhysics {
       b.impact = Number.isNaN(pvx) ? 0 : Math.hypot(body.vx - pvx * damp, body.vy - (pre[i * 2 + 1]! + g * dt) * damp);
     }
     const merges: MergeContact[] = [];
-    const used = new Set<FruitBody>();
-    for (const c of this.world.touches) {
+    const touches = this.world.touches;
+    for (let i = 0; i < touches.length; i++) {
+      const c = touches[i]!;
       if (c.sensor) continue;
       const fa = c.a.userData;
       const fb = c.b.userData;
@@ -202,10 +214,8 @@ export class FruitPhysics {
       const b = fb instanceof FruitBody ? fb : null;
       if (a && (b || c.b === this.floor)) a.landed = true;
       if (b && (a || c.a === this.floor)) b.landed = true;
-      if (!a || !b || a.level !== b.level || a.removed || b.removed || used.has(a) || used.has(b)) continue;
+      if (!a || !b || a.level !== b.level || a.removed || b.removed || paired(merges, a) || paired(merges, b)) continue;
       merges.push({ a, b });
-      used.add(a);
-      used.add(b);
     }
     return { merges };
   }

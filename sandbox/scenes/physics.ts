@@ -92,6 +92,7 @@ function paintBodies(ctx: Ctx2D, world: RigidWorld): void {
     }
   }
   ctx.globalAlpha = 1;
+  ctx.lineJoin = 'miter';
 }
 
 abstract class RigidDemo extends DemoScene {
@@ -602,6 +603,7 @@ class RigidJointsScene extends RigidDemo {
       ctx.stroke();
       if (j.type === 'mouse') ctx.setLineDash([]);
     }
+    ctx.lineCap = 'butt';
   }
 
   /** Revolute pivots as small bolts. */

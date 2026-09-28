@@ -97,6 +97,8 @@ class Slingshot extends Node {
     ctx.moveTo(s, 0);
     ctx.lineTo(this.pouchX, this.pouchY);
     ctx.stroke();
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
   }
 
   override describe() {
@@ -431,6 +433,7 @@ class SpringGraph extends Node {
       });
       ctx.stroke();
     }
+    ctx.lineJoin = 'miter';
   }
 }
 

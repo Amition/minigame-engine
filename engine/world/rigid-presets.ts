@@ -1,6 +1,6 @@
 import type { Vec2 } from '../core/math';
 import type { RigidBody } from './rigid-body';
-import type { RigidRevoluteJoint } from './rigid-joint';
+import { pointDistance, type RigidRevoluteJoint } from './rigid-joint';
 import { rigidCircle, rigidPolygon, rigidBox, type RigidShape } from './rigid-shapes';
 import type { RigidWorld } from './rigid-world';
 
@@ -262,7 +262,7 @@ export function createRigidRagdoll(world: RigidWorld, opts: RigidRagdollOptions)
 
   let totalMass = 0;
   for (const b of bodies) totalMass += b.mass;
-  const g = Math.hypot(world.gravityX, world.gravityY) || 1600;
+  const g = Math.sqrt(world.gravityX * world.gravityX + world.gravityY * world.gravityY) || 1600;
   const weightHeight = totalMass * g * HEIGHT * scale;
   const friction = (opts.jointFriction ?? 0.001) * weightHeight;
 
@@ -434,7 +434,7 @@ export function createRigidChain(world: RigidWorld, opts: RigidChainOptions): Ri
     const p1 = chainEndPoint(opts.to);
     const dx = p1.x - p0.x;
     const dy = p1.y - p0.y;
-    const span = Math.hypot(dx, dy);
+    const span = Math.sqrt(dx * dx + dy * dy);
     linkLength = Math.max(opts.linkLength ?? 0, span / n);
     const total = linkLength * n;
     if (total <= span * 1.0001 || span < 1e-6) {
@@ -479,7 +479,7 @@ export function createRigidChain(world: RigidWorld, opts: RigidChainOptions): Ri
     pins.push(pin);
     return pin;
   };
-  const g = Math.hypot(world.gravityX, world.gravityY) || 1600;
+  const g = Math.sqrt(world.gravityX * world.gravityX + world.gravityY * world.gravityY) || 1600;
   const friction = (opts.jointFriction ?? 0.05) * bodies[0]!.mass * g * linkLength;
   const extra = { ...(opts.breakForce !== undefined ? { breakForce: opts.breakForce } : {}), motorSpeed: 0, maxMotorTorque: friction };
   const joints: RigidRevoluteJoint[] = [];
@@ -506,7 +506,7 @@ export function createRigidChain(world: RigidWorld, opts: RigidChainOptions): Ri
 function sagPoints(p0: Vec2, p1: Vec2, total: number, n: number): Vec2[] {
   const dx = p1.x - p0.x;
   const dy = p1.y - p0.y;
-  const span = Math.hypot(dx, dy);
+  const span = Math.sqrt(dx * dx + dy * dy);
   let nx = -dy / span;
   let ny = dx / span;
   if (ny < 0 || (ny === 0 && nx < 0)) {
@@ -523,7 +523,7 @@ function sagPoints(p0: Vec2, p1: Vec2, total: number, n: number): Vec2[] {
     let prev = at(s, 0);
     for (let i = 1; i <= SAMPLES; i++) {
       const p = at(s, i / SAMPLES);
-      len += Math.hypot(p.x - prev.x, p.y - prev.y);
+      len += pointDistance(p, prev);
       prev = p;
     }
     return len;
@@ -541,7 +541,7 @@ function sagPoints(p0: Vec2, p1: Vec2, total: number, n: number): Vec2[] {
   for (let i = 1; i <= SAMPLES; i++) {
     const p = at(s, i / SAMPLES);
     const q = samples[i - 1]!;
-    cum.push(cum[i - 1]! + Math.hypot(p.x - q.x, p.y - q.y));
+    cum.push(cum[i - 1]! + pointDistance(p, q));
     samples.push(p);
   }
   const len = cum[SAMPLES]!;

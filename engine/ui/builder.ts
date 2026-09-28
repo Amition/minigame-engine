@@ -1,10 +1,11 @@
 import { Game } from '../core/game';
-import type { Rect } from '../core/math';
+import { Mat2D, type Rect } from '../core/math';
 import { Node } from '../scene/node';
 import { Button, IconButton, type ButtonProps, type IconButtonProps } from './button';
 import { Checkbox, ProgressBar, SegmentedControl, Slider, Toggle } from './controls';
 import type { CheckboxProps, ProgressBarProps, SegmentedControlProps, SliderProps, ToggleProps } from './controls';
 import { Badge, StarRating, type BadgeProps, type StarRatingProps } from './decor';
+import { readFollowRect, worldMatrixInto } from './follow';
 import { Tabs, UIGrid, type GridProps, type TabsProps } from './grid';
 import { UIIcon, type IconProps, type UIIconSource } from './icon';
 import { UIImage, type ImageProps } from './image';
@@ -162,6 +163,18 @@ export function buildUI(spec: UISpec | string): Node {
 
 // ---------------------------------------------------------------- screens
 
+const screenMat = new Mat2D();
+const screenRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+const same = (a: number, b: number) => a === b || (a !== a && b !== b);
+
+function copyRect(src: Rect, out: Rect): Rect {
+  out.x = src.x;
+  out.y = src.y;
+  out.w = src.w;
+  out.h = src.h;
+  return out;
+}
+
 export interface MountOptions {
   /**
    * Area the screen fills: 'safe' (default; game.safe), 'view' (whole visible area), or a rect / rect getter in the
@@ -182,7 +195,8 @@ export interface MountOptions {
  */
 export class UIScreen extends UIView {
   area: NonNullable<MountOptions['area']>;
-  private key = '';
+  private synced = false;
+  private readonly last: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   constructor(area: MountOptions['area'] = 'safe', background?: UIColor) {
     super({ position: 'absolute', direction: 'column', align: 'stretch' }, 'Screen');
@@ -197,20 +211,41 @@ export class UIScreen extends UIView {
     const a = this.area;
     if (typeof a === 'function') return a(this.parent);
     if (typeof a === 'object') return a;
-    const g = Game.current;
+    return this.rectInto({ x: 0, y: 0, w: 0, h: 0 });
+  }
+
+  private rectInto(out: Rect): Rect {
+    const a = this.area;
     const p = this.parent;
-    if (!g) return { x: 0, y: 0, w: p?.width ?? 750, h: p?.height ?? 1334 };
-    const r = a === 'view' ? { x: 0, y: 0, w: g.view.width, h: g.view.height } : g.safe;
-    if (!p) return { ...r };
-    const o = p.toLocal(r.x, r.y);
-    return { x: o.x, y: o.y, w: r.w, h: r.h };
+    if (typeof a === 'function') {
+      if (!readFollowRect(a, p, out)) copyRect(a(p), out);
+      return out;
+    }
+    if (typeof a === 'object') return copyRect(a, out);
+    const g = Game.current;
+    if (!g) {
+      out.x = 0;
+      out.y = 0;
+      out.w = p?.width ?? 750;
+      out.h = p?.height ?? 1334;
+      return out;
+    }
+    if (a === 'view') {
+      out.x = 0;
+      out.y = 0;
+      out.w = g.view.width;
+      out.h = g.view.height;
+    } else copyRect(g.safe, out);
+    if (p) worldMatrixInto(p, screenMat).invert().apply(out.x, out.y, out);
+    return out;
   }
 
   uiSync(): boolean {
-    const r = this.rect();
-    const key = `${r.x},${r.y},${r.w},${r.h}`;
-    if (key === this.key) return false;
-    this.key = key;
+    const r = this.rectInto(screenRect);
+    const last = this.last;
+    if (this.synced && same(r.x, last.x) && same(r.y, last.y) && same(r.w, last.w) && same(r.h, last.h)) return false;
+    this.synced = true;
+    copyRect(r, last);
     this.layout.set({ left: r.x, top: r.y, width: r.w, height: r.h });
     const bg = this.children[0];
     if (bg instanceof UIView && bg.kind === 'ScreenBg') {

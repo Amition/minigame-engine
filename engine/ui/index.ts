@@ -65,6 +65,7 @@ export {
   type UIBoxProps,
   type UIViewProps,
 } from './view';
+export { uiShade, uiMix, UIGradientCache } from './paint';
 export { Label, type LabelProps } from './label';
 export { RichText, parseRichText, stripRichText, type RichTextProps, type RichTextRun } from './richtext';
 export {

@@ -466,6 +466,7 @@ export class IsoMap extends Node implements PathGrid {
     const maxDiag = this.cols + this.rows - 2;
     for (let s = 0; s <= maxDiag; s++) {
       while (oi < objs.length && objs[oi]!.tileX + objs[oi]!.tileY < s) objs[oi++]!.render(ctx);
+      this.applyLocalTransform(ctx);
       const tx0 = Math.max(0, s - (this.rows - 1));
       const tx1 = Math.min(this.cols - 1, s);
       for (let tx = tx0; tx <= tx1; tx++) this.drawTile(ctx, tx, s - tx, vis);

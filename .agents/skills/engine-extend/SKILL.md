@@ -117,6 +117,32 @@ Local space: `draw(ctx)` paints in the node's own box `(0,0)-(width,height)`; `(
 the parent; the anchor (fractions of width/height) is also the pivot for rotation, scale and skew.
 `render()` applies the transform, alpha, blend and clip, then calls `draw`, children (by `zIndex`), `drawOver`.
 
+Render contract (flat renderer, `engine/scene/node.ts`):
+
+- Each node computes its world matrix (parent world x local, no allocation) and effective alpha and applies
+  them with `ctx.setTransform` / `globalAlpha` (alpha only when it changes). There is no `save()`/`restore()`
+  per node: only nodes with `clip`, `blend` or `isolate: true` get one.
+- So `draw()`/`drawOver()` must put back any canvas state they change other than transform, alpha,
+  fill/stroke style, lineWidth, font and text alignment: shadows (`shadowBlur = shadowOffsetX/Y = 0`),
+  `setLineDash([])`, `lineCap = 'butt'`, `lineJoin = 'miter'`, `miterLimit = 10`, composite op, image
+  smoothing. `globalAlpha` is re-asserted after `draw()`. When resetting is awkward, set `isolate: true`
+  (costs a save/restore). Local `ctx.translate/rotate/scale` inside `draw()` is fine: the next node sets its
+  own transform. Under Vitest (`Node.checkDrawState`, on when `NODE_ENV === 'test'`) a leak prints one
+  `[render] Kind#id: draw() leaves ctx.<prop> ...` warning per kind and property; set it to `true` in a
+  script to audit a game.
+- Overriding `renderContent` / `renderChildren`: use the protected helpers instead of `ctx.save()` +
+  `ctx.transform()`: `renderDraw(ctx)`, `renderChildren(ctx)`, `renderDrawOver(ctx)` (restores this node's
+  transform first), `renderChildrenOffset(ctx, dx, dy)` / `renderChildrenWith(ctx, m)` (children as if a
+  local offset/matrix were applied), `applyLocalTransform(ctx)` (back to this node's space and alpha after
+  children, e.g. before drawing between them), and `saveRenderState(ctx)` / `restoreRenderState(ctx)` around a
+  custom clip. A raw `ctx.save()/restore()` pair is fine only if it contains no child rendering.
+- Offscreen rendering: `renderContentTo(ctx, m)` draws the node's content into another canvas with `m` as its
+  root matrix (see `CacheContainer`); `Node.renderRoot(ctx, node, m)` renders a whole subtree as a pass
+  (`Game.render` seeds `(k, 0, 0, k, ox, oy)`). Calling `node.render(ctx)` outside a pass renders from an
+  identity transform, not from the ctx's current one.
+- Hit tests skip subtrees whose `interactiveDescendants` is 0 (the count is kept by `add`/`remove` and the
+  `interactive` setter), so keep `interactive` an assignment, never a class field redeclared in a subclass.
+
 ```ts
 // engine/chart/sparkline.ts — example of a new module file
 import type { Color } from '../core/color';
@@ -189,6 +215,8 @@ export class Sparkline extends Node {
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     ctx.stroke();
+    ctx.lineJoin = 'miter';
+    ctx.lineCap = 'butt';
   }
 
   override describe() {
@@ -205,6 +233,8 @@ Rules the example follows:
   the caller's `NodeOptions` win. `super(opts)` followed by field initializers silently overwrites them.
 - `noImplicitOverride` is on: write `override` on `kind`, `draw`, `drawOver`, `describe`, `update`,
   `hitTest`, `onDestroy`, `renderContent`.
+- `draw()` resets the stroke style it changed (`lineJoin`/`lineCap` above): nodes share canvas state (see
+  the render contract).
 - `kind` returns the class name; it is the selector type and the first word of each dump line.
 - `describe()` spreads `super.describe()` and adds a few short, rounded values. They appear in
   `pnpm shot --dump` and become selector attributes (`Sparkline[points=32]`, `[text*=分]`, `[tex^=hero]`;

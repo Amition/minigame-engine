@@ -151,10 +151,11 @@ function collidePolygonCircle(
 /** B's face must separate by this much more than A's to become the reference (avoids flip-flopping). */
 const FLIP_TOLERANCE = 0.025;
 
-let sepEdge = 0;
+/** findMaxSeparation result (a returned double would be boxed on every call). */
+const sepOut = { sep: 0, edge: 0 };
 
-/** Max separation of poly2 from the edge normals of poly1 (Box2D b2FindMaxSeparation); sets sepEdge. */
-function findMaxSeparation(p1: RigidPolygonShape, b1: RigidBody, p2: RigidPolygonShape, b2: RigidBody): number {
+/** Max separation of poly2 from the edge normals of poly1 (Box2D b2FindMaxSeparation), written to sepOut. */
+function findMaxSeparation(p1: RigidPolygonShape, b1: RigidBody, p2: RigidPolygonShape, b2: RigidBody): void {
   const c = b2.c * b1.c + b2.s * b1.s;
   const s = b2.c * b1.s - b2.s * b1.c;
   const dx = b1.x - b2.x;
@@ -186,8 +187,8 @@ function findMaxSeparation(p1: RigidPolygonShape, b1: RigidBody, p2: RigidPolygo
       best = i;
     }
   }
-  sepEdge = best;
-  return maxSep;
+  sepOut.sep = maxSep;
+  sepOut.edge = best;
 }
 
 // Clip scratch: incident edge (in), after the first side plane (c1), after the second (c2). World space.
@@ -247,12 +248,14 @@ function collidePolygons(
   pb: RigidPolygonShape,
   margin: number,
 ): void {
-  const sepA = findMaxSeparation(pa, a, pb, b);
+  findMaxSeparation(pa, a, pb, b);
+  const sepA = sepOut.sep;
   if (sepA > margin) return;
-  const edgeA = sepEdge;
-  const sepB = findMaxSeparation(pb, b, pa, a);
+  const edgeA = sepOut.edge;
+  findMaxSeparation(pb, b, pa, a);
+  const sepB = sepOut.sep;
   if (sepB > margin) return;
-  const edgeB = sepEdge;
+  const edgeB = sepOut.edge;
 
   let p1: RigidPolygonShape;
   let p2: RigidPolygonShape;
@@ -315,7 +318,7 @@ function collidePolygons(
   const l12y = v1[iv2 * 2 + 1]!;
   let ltx = l12x - l11x;
   let lty = l12y - l11y;
-  const len = Math.hypot(ltx, lty);
+  const len = Math.sqrt(ltx * ltx + lty * lty);
   ltx /= len;
   lty /= len;
   const tx = b1.c * ltx - b1.s * lty;
@@ -386,7 +389,7 @@ export function rigidWorldManifold(out: RigidWorldPoint, m: RigidManifold, a: Ri
     let ny = 0;
     const dx = pbx - pax;
     const dy = pby - pay;
-    const d = Math.hypot(dx, dy);
+    const d = Math.sqrt(dx * dx + dy * dy);
     if (d > 1e-12) {
       nx = dx / d;
       ny = dy / d;
@@ -431,23 +434,19 @@ export function rigidWorldManifold(out: RigidWorldPoint, m: RigidManifold, a: Ri
   }
 }
 
-/** Result of rigidRaycastBody (fraction along the segment and the surface normal). */
+/** In/out of rigidRaycastBody: the largest fraction to accept goes in, the hit fraction and surface normal come out. */
 export interface RigidRayScratch {
   fraction: number;
   nx: number;
   ny: number;
 }
 
-/** Segment (x0,y0)-(x1,y1) against one body's shape. Segments starting inside the shape do not hit. */
-export function rigidRaycastBody(
-  out: RigidRayScratch,
-  body: RigidBody,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  maxFraction: number,
-): boolean {
+/**
+ * Segment (x0,y0)-(x1,y1) against one body's shape. Segments starting inside the shape do not hit. The fraction
+ * limit is read from `out` rather than passed: a computed double argument is boxed on every call V8 does not inline.
+ */
+export function rigidRaycastBody(out: RigidRayScratch, body: RigidBody, x0: number, y0: number, x1: number, y1: number): boolean {
+  const maxFraction = out.fraction;
   const sh = body.shape;
   if (sh.type === 'circle') {
     const sx = x0 - body.x;
@@ -465,7 +464,7 @@ export function rigidRaycastBody(
     t /= rr;
     const nx = sx + t * rx;
     const ny = sy + t * ry;
-    const len = Math.hypot(nx, ny);
+    const len = Math.sqrt(nx * nx + ny * ny);
     out.fraction = t;
     out.nx = nx / len;
     out.ny = ny / len;

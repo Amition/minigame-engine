@@ -75,7 +75,6 @@ export class RigidContact {
   restitution = 0;
   /** Relative normal speed when the touch began (>= 0). */
   approachSpeed = 0;
-  readonly key: number;
   stamp = 0;
   touchStamp = 0;
   mtype = RIGID_CIRCLES;
@@ -91,10 +90,9 @@ export class RigidContact {
   nm12 = 0;
   nm22 = 0;
 
-  constructor(a: RigidBody, b: RigidBody, key: number) {
+  constructor(a: RigidBody, b: RigidBody) {
     this.a = a;
     this.b = b;
-    this.key = key;
     this.sensor = a.sensor || b.sensor;
   }
 
@@ -206,8 +204,6 @@ export interface RigidRayHit {
   distance: number;
 }
 
-const pairKey = (a: number, b: number): number => (a < b ? a * 67108864 + b : b * 67108864 + a);
-
 /** Awake dynamic body or moving kinematic body: its contacts need updating. */
 function isActive(b: RigidBody): boolean {
   if (b.type === 'dynamic') return !b.sleeping;
@@ -219,10 +215,56 @@ type QueuedEvent = ['contactBegin' | 'contactEnd', RigidContactEvent] | ['jointB
 /** A joint that must not let its two bodies collide links them (checked on AABB-overlapping pairs only). */
 function jointBlocksPair(a: RigidBody, b: RigidBody): boolean {
   const list = a.joints.length <= b.joints.length ? a.joints : b.joints;
-  for (const j of list) {
+  for (let i = 0; i < list.length; i++) {
+    const j = list[i]!;
     if (!j.collideConnected && !j.broken && ((j.a === a && j.b === b) || (j.a === b && j.b === a))) return true;
   }
   return false;
+}
+
+/** The contact between a and b, if any (scans the shorter contact edge list). */
+function findContact(a: RigidBody, b: RigidBody): RigidContact | null {
+  const edges = a.contactEdges.length <= b.contactEdges.length ? a.contactEdges : b.contactEdges;
+  const other = edges === a.contactEdges ? b : a;
+  for (let i = 0; i < edges.length; i++) {
+    const c = edges[i]!;
+    if (c.a === other || c.b === other) return c;
+  }
+  return null;
+}
+
+/** Swap-removes a contact from one body's edge list. */
+function removeEdge(body: RigidBody, c: RigidContact): void {
+  const edges = body.contactEdges;
+  const i = edges.lastIndexOf(c);
+  if (i < 0) return;
+  edges[i] = edges[edges.length - 1]!;
+  edges.pop();
+}
+
+/** Insertion sort on the sweep-axis AABB min with id tie-breaks (nearly sorted from the previous substep). */
+function sortSweep(list: RigidBody[], y: boolean): void {
+  for (let i = 1; i < list.length; i++) {
+    const b = list[i]!;
+    const key = y ? b.minY : b.minX;
+    let j = i - 1;
+    while (j >= 0) {
+      const o = list[j]!;
+      const k = y ? o.minY : o.minX;
+      if (!(k > key || (k === key && o.id > b.id))) break;
+      list[j + 1] = o;
+      j--;
+    }
+    list[j + 1] = b;
+  }
+}
+
+function byMinX(a: RigidBody, b: RigidBody): number {
+  return a.minX < b.minX ? -1 : a.minX > b.minX ? 1 : a.id - b.id;
+}
+
+function byMinY(a: RigidBody, b: RigidBody): number {
+  return a.minY < b.minY ? -1 : a.minY > b.minY ? 1 : a.id - b.id;
 }
 
 /**
@@ -282,12 +324,19 @@ export class RigidWorld implements System {
   private touchStamp = 0;
   private stepping = false;
   private readonly sorted: RigidBody[] = [];
-  private readonly contactMap = new Map<number, RigidContact>();
+  // Per-step lists are written by count and truncated once at the end of the step, so steady-state steps reuse
+  // their backing stores instead of re-growing them.
+  private touchCount = 0;
   private readonly solverList: RigidContact[] = [];
+  private solverCount = 0;
   private readonly pendingAdd: RigidBody[] = [];
   private readonly pendingRemove: RigidBody[] = [];
   private nextJointId = 1;
   private readonly jointList: RigidJoint[] = [];
+  private jointCount = 0;
+  private readonly wakeStack: RigidBody[] = [];
+  private activeIdx = new Int32Array(64);
+  private sweepY = false;
   private readonly pendingJointAdd: RigidJoint[] = [];
   private readonly pendingJointRemove: RigidJoint[] = [];
   private readonly brokenJoints: RigidJoint[] = [];
@@ -368,19 +417,24 @@ export class RigidWorld implements System {
     for (const b of this.bodies) {
       b.world = null;
       b.joints.length = 0;
+      b.contactEdges.length = 0;
     }
     for (const b of this.pendingAdd) b.world = null;
     this.joints.length = 0;
     this.jointList.length = 0;
+    this.jointCount = 0;
     this.pendingJointAdd.length = 0;
     this.pendingJointRemove.length = 0;
     this.brokenJoints.length = 0;
     this.bodies.length = 0;
     this.sorted.length = 0;
+    this.sweepY = false;
     this.contacts.length = 0;
     this.touches.length = 0;
+    this.touchCount = 0;
     this.solverList.length = 0;
-    this.contactMap.clear();
+    this.solverCount = 0;
+    this.wakeStack.length = 0;
     this.pendingAdd.length = 0;
     this.pendingRemove.length = 0;
     this.queue = [];
@@ -413,7 +467,7 @@ export class RigidWorld implements System {
         list[n++] = c;
         continue;
       }
-      this.contactMap.delete(c.key);
+      removeEdge(c.other(b), c);
       if (c.touching) {
         c.touching = false;
         this.queue.push(['contactEnd', this.makeEvent(c, false)]);
@@ -421,6 +475,7 @@ export class RigidWorld implements System {
       }
     }
     list.length = n;
+    b.contactEdges.length = 0;
   }
 
   // ---------------------------------------------------------------- joints
@@ -486,15 +541,17 @@ export class RigidWorld implements System {
   /** Called by RigidBody.setPosition: wakes bodies that touched it or overlap its new place. */
   onTeleport(b: RigidBody): void {
     if (b.world !== this) return;
-    for (const c of this.contacts) {
-      if (c.a === b || c.b === b) {
-        c.a.wake();
-        c.b.wake();
-      }
+    const edges = b.contactEdges;
+    for (let i = 0; i < edges.length; i++) {
+      const c = edges[i]!;
+      c.a.wake();
+      c.b.wake();
     }
     if (b.type === 'dynamic') return;
     const m = this.contactMargin;
-    for (const o of this.bodies) {
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const o = bodies[i]!;
       if (o.sleeping && o.minX <= b.maxX + m && o.maxX >= b.minX - m && o.minY <= b.maxY + m && o.maxY >= b.minY - m) o.wake();
     }
   }
@@ -537,7 +594,9 @@ export class RigidWorld implements System {
 
   /** Copies body poses to bound nodes; alpha < 1 blends from the previous step's pose. */
   syncNodes(alpha = 1): void {
-    for (const b of this.bodies) {
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       const n = b.node;
       if (!n) continue;
       const x = alpha >= 1 ? b.x : b.prevX + (b.x - b.prevX) * alpha;
@@ -563,23 +622,31 @@ export class RigidWorld implements System {
     if (this.stepping) throw new Error('RigidWorld.step: already stepping (called from an event callback?)');
     this.stepping = true;
     try {
-      this.touches.length = 0;
+      this.touchCount = 0;
       this.touchStamp++;
-      for (const b of this.bodies) {
+      const bodies = this.bodies;
+      for (let i = 0; i < bodies.length; i++) {
+        const b = bodies[i]!;
         b.prevX = b.x;
         b.prevY = b.y;
         b.prevAngle = b.angle;
       }
       const n = Math.max(1, Math.floor(this.substeps));
       for (let i = 0; i < n; i++) this.substep(h / n);
-      for (const b of this.bodies) b.fx = b.fy = b.torque = 0;
+      for (let i = 0; i < bodies.length; i++) {
+        const b = bodies[i]!;
+        b.fx = b.fy = b.torque = 0;
+      }
       if (this.brokenJoints.length) {
-        for (const j of this.brokenJoints) this.detachJoint(j);
+        for (let i = 0; i < this.brokenJoints.length; i++) this.detachJoint(this.brokenJoints[i]!);
         this.brokenJoints.length = 0;
       }
       this.time += h;
       this.steps++;
     } finally {
+      this.touches.length = this.touchCount;
+      this.solverList.length = this.solverCount;
+      this.jointList.length = this.jointCount;
       this.stepping = false;
     }
     this.drain();
@@ -595,22 +662,24 @@ export class RigidWorld implements System {
         if (this.queue.length) {
           const q = this.queue;
           this.queue = [];
-          for (const e of q) {
+          for (let i = 0; i < q.length; i++) {
+            const e = q[i]!;
             if (e[0] === 'jointBreak') this.events.emit('jointBreak', e[1]);
             else this.events.emit(e[0], e[1]);
           }
         } else if (this.pendingRemove.length) {
           const list = this.pendingRemove.splice(0);
-          for (const b of list) if (b.world !== this) this.detach(b);
+          for (let i = 0; i < list.length; i++) if (list[i]!.world !== this) this.detach(list[i]!);
         } else if (this.pendingJointRemove.length) {
           const list = this.pendingJointRemove.splice(0);
-          for (const j of list) if (j.world !== this) this.detachJoint(j);
+          for (let i = 0; i < list.length; i++) if (list[i]!.world !== this) this.detachJoint(list[i]!);
         } else if (this.pendingAdd.length) {
           const list = this.pendingAdd.splice(0);
-          for (const b of list) if (b.world === this) this.attachBody(b);
+          for (let i = 0; i < list.length; i++) if (list[i]!.world === this) this.attachBody(list[i]!);
         } else if (this.pendingJointAdd.length) {
           const list = this.pendingJointAdd.splice(0);
-          for (const j of list) {
+          for (let i = 0; i < list.length; i++) {
+            const j = list[i]!;
             if (j.world !== this) continue;
             if (j.a.world === this && j.b.world === this) this.attachJoint(j);
             else j.world = null;
@@ -641,13 +710,23 @@ export class RigidWorld implements System {
 
   private substep(h: number): void {
     const bodies = this.bodies;
-    for (let i = 0; i < bodies.length; i++) bodies[i]!.slot = i;
+    let anyActive = false;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
+      b.slot = i;
+      if (!anyActive && isActive(b)) anyActive = true;
+    }
+    if (!anyActive) {
+      this.restingSubstep();
+      return;
+    }
     this.collide(h);
     this.propagateWake();
 
     const gx = this.gravityX;
     const gy = this.gravityY;
-    for (const b of bodies) {
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (b.type !== 'dynamic' || b.sleeping) continue;
       b.vx += h * (b.gravityScale * gx + b.invMass * b.fx);
       b.vy += h * (b.gravityScale * gy + b.invMass * b.fy);
@@ -661,18 +740,21 @@ export class RigidWorld implements System {
     }
 
     this.prepareContacts(h);
-    const joints = this.prepareJoints(h);
+    this.prepareJoints(h);
+    const joints = this.jointList;
+    const nJoints = this.jointCount;
     for (let i = 0; i < this.velocityIterations; i++) {
-      for (let k = 0; k < joints.length; k++) joints[k]!.solveVelocity();
+      for (let k = 0; k < nJoints; k++) joints[k]!.solveVelocity();
       this.solveVelocities();
     }
-    if (joints.length) this.checkJointBreaks();
+    if (nJoints) this.checkJointBreaks();
     this.applyRestitution();
     this.speculativeTouches();
 
     const maxV2 = this.maxSpeed * this.maxSpeed;
     const maxW = (0.5 * Math.PI) / h;
-    for (const b of bodies) {
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (!isActive(b)) continue;
       if (b.type === 'dynamic') {
         const v2 = b.vx * b.vx + b.vy * b.vy;
@@ -698,64 +780,156 @@ export class RigidWorld implements System {
     for (let i = 0; i < this.positionIterations; i++) {
       const contactsOk = this.solvePositions();
       let jointsOk = true;
-      for (let k = 0; k < joints.length; k++) {
+      for (let k = 0; k < nJoints; k++) {
         const j = joints[k]!;
         if (!j.broken && !j.solvePosition(js)) jointsOk = false;
       }
       if (contactsOk && jointsOk) break;
     }
-    for (const b of bodies) if (isActive(b)) b.syncTransform();
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
+      if (isActive(b)) b.syncTransform();
+    }
 
-    for (const e of this.substepBegins) e.impulse = e.sensor ? 0 : e.contact.impulse;
-    this.substepBegins.length = 0;
+    const begins = this.substepBegins;
+    for (let i = 0; i < begins.length; i++) {
+      const e = begins[i]!;
+      e.impulse = e.sensor ? 0 : e.contact.impulse;
+    }
+    begins.length = 0;
     this.updateSleep(h);
   }
 
-  /** Sort-and-sweep on AABB minX; creates contacts for new pairs, stamps pairs that still overlap. */
-  private broadphase(stamp: number): void {
-    const list = this.sorted;
-    for (let i = 1; i < list.length; i++) {
-      const b = list[i]!;
-      const key = b.minX;
-      let j = i - 1;
-      while (j >= 0 && (list[j]!.minX > key || (list[j]!.minX === key && list[j]!.id > b.id))) {
-        list[j + 1] = list[j]!;
-        j--;
-      }
-      list[j + 1] = b;
-    }
-    const m = this.contactMargin;
-    let maxSpec = 0;
-    for (const b of list) if (b.spec > maxSpec) maxSpec = b.spec;
+  /**
+   * Substep of a world where nothing moves (every dynamic body asleep, kinematics still): no pair can be new or
+   * change, so only the resting contacts are recorded in touches. Same outcome as a full substep.
+   */
+  private restingSubstep(): void {
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) bodies[i]!.spec = 0;
+    this.solverCount = 0;
+    this.jointCount = 0;
+    const list = this.contacts;
+    const touches = this.touches;
+    const stamp = this.touchStamp;
     for (let i = 0; i < list.length; i++) {
-      const a = list[i]!;
-      const aActive = isActive(a);
-      const reach = m + a.spec;
-      const sweepX = a.maxX + reach + maxSpec;
-      for (let j = i + 1; j < list.length; j++) {
-        const b = list[j]!;
-        if (b.minX > sweepX) break;
-        const r = reach + b.spec;
-        if (b.minX > a.maxX + r || b.minY > a.maxY + r || b.maxY < a.minY - r) continue;
-        if (!aActive && !isActive(b)) continue;
-        if (!shouldCollide(a, b)) continue;
-        if (a.joints.length !== 0 && b.joints.length !== 0 && jointBlocksPair(a, b)) continue;
-        const key = pairKey(a.id, b.id);
-        let c = this.contactMap.get(key);
-        if (!c) {
-          const swap = a.shape.type !== b.shape.type ? a.shape.type === 'circle' : a.id > b.id;
-          c = swap ? new RigidContact(b, a, key) : new RigidContact(a, b, key);
-          this.contactMap.set(key, c);
-          this.contacts.push(c);
-        }
-        c.stamp = stamp;
+      const c = list[i]!;
+      if (c.touching && c.touchStamp !== stamp) {
+        c.touchStamp = stamp;
+        touches[this.touchCount++] = c;
       }
     }
   }
 
+  /**
+   * Sort-and-sweep on the AABB min of one axis; creates contacts for new pairs, stamps pairs that still overlap.
+   * The axis is the one along which non-static bodies spread more (a tall pile sweeps y); it only flips once the
+   * other axis spreads 1.5x more, and a flip re-sorts from scratch. Pairs of two inactive bodies are never needed,
+   * so an inactive body only sweeps over the active bodies after it.
+   */
+  private broadphase(stamp: number): void {
+    const list = this.sorted;
+    const n = list.length;
+    let k = 0;
+    let sx = 0;
+    let sy = 0;
+    let sxx = 0;
+    let syy = 0;
+    for (let i = 0; i < n; i++) {
+      const b = list[i]!;
+      if (b.type === 'static') continue;
+      const cx = b.minX + b.maxX;
+      const cy = b.minY + b.maxY;
+      k++;
+      sx += cx;
+      sy += cy;
+      sxx += cx * cx;
+      syy += cy * cy;
+    }
+    // k^2 times the variances of the AABB centres (times 4): only their ratio matters.
+    const varX = k * sxx - sx * sx;
+    const varY = k * syy - sy * sy;
+    if (this.sweepY ? varX > 1.5 * varY : varY > 1.5 * varX) {
+      this.sweepY = !this.sweepY;
+      list.sort(this.sweepY ? byMinY : byMinX);
+    } else sortSweep(list, this.sweepY);
+    const y = this.sweepY;
+
+    if (this.activeIdx.length < n) this.activeIdx = new Int32Array(n * 2);
+    const active = this.activeIdx;
+    let nActive = 0;
+    let maxSpec = 0;
+    for (let i = 0; i < n; i++) {
+      const b = list[i]!;
+      if (b.spec > maxSpec) maxSpec = b.spec;
+      if (isActive(b)) active[nActive++] = i;
+    }
+    const m = this.contactMargin;
+    // next = number of active bodies before index i, so active[next] is the first active index >= i. The loops are
+    // spelled out per axis: a shared loop reading the axis per candidate costs about 10% of a sparse world's step.
+    let next = 0;
+    for (let i = 0; i < n; i++) {
+      const a = list[i]!;
+      const reach = m + a.spec;
+      const end = (y ? a.maxY : a.maxX) + reach + maxSpec;
+      if (next < nActive && active[next] === i) {
+        next++;
+        if (y) {
+          for (let j = i + 1; j < n; j++) {
+            const b = list[j]!;
+            if (b.minY > end) break;
+            this.pair(a, b, reach, stamp, true);
+          }
+        } else {
+          for (let j = i + 1; j < n; j++) {
+            const b = list[j]!;
+            if (b.minX > end) break;
+            this.pair(a, b, reach, stamp, false);
+          }
+        }
+      } else if (y) {
+        for (let q = next; q < nActive; q++) {
+          const b = list[active[q]!]!;
+          if (b.minY > end) break;
+          this.pair(a, b, reach, stamp, true);
+        }
+      } else {
+        for (let q = next; q < nActive; q++) {
+          const b = list[active[q]!]!;
+          if (b.minX > end) break;
+          this.pair(a, b, reach, stamp, false);
+        }
+      }
+    }
+  }
+
+  /**
+   * Broadphase candidate (at least one active; b sorts after a on the sweep axis, so b's min on that axis cannot be
+   * below a's): stamps or creates their contact.
+   */
+  private pair(a: RigidBody, b: RigidBody, reach: number, stamp: number, y: boolean): void {
+    const r = reach + b.spec;
+    if (y) {
+      if (b.minX > a.maxX + r || b.maxX < a.minX - r || b.minY > a.maxY + r) return;
+    } else if (b.minY > a.maxY + r || b.maxY < a.minY - r || b.minX > a.maxX + r) return;
+    if (!shouldCollide(a, b)) return;
+    if (a.joints.length !== 0 && b.joints.length !== 0 && jointBlocksPair(a, b)) return;
+    let c = findContact(a, b);
+    if (!c) {
+      const swap = a.shape.type !== b.shape.type ? a.shape.type === 'circle' : a.id > b.id;
+      c = swap ? new RigidContact(b, a) : new RigidContact(a, b);
+      a.contactEdges.push(c);
+      b.contactEdges.push(c);
+      this.contacts.push(c);
+    }
+    c.stamp = stamp;
+  }
+
   private collide(h: number): void {
-    const g = Math.hypot(this.gravityX, this.gravityY) * h;
-    for (const b of this.bodies) {
+    const g = Math.sqrt(this.gravityX * this.gravityX + this.gravityY * this.gravityY) * h;
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (!isActive(b)) {
         b.spec = 0;
         continue;
@@ -773,7 +947,8 @@ export class RigidWorld implements System {
       const active = isActive(c.a) || isActive(c.b);
       if (c.stamp !== stamp) {
         if (active) {
-          this.contactMap.delete(c.key);
+          removeEdge(c.a, c);
+          removeEdge(c.b, c);
           if (c.touching) {
             c.touching = false;
             this.queue.push(['contactEnd', this.makeEvent(c, false)]);
@@ -789,7 +964,7 @@ export class RigidWorld implements System {
       }
       if (c.touching && c.touchStamp !== this.touchStamp) {
         c.touchStamp = this.touchStamp;
-        this.touches.push(c);
+        this.touches[this.touchCount++] = c;
       }
       list[n++] = c;
     }
@@ -884,45 +1059,70 @@ export class RigidWorld implements System {
    * timers.
    */
   private propagateWake(): void {
+    const bodies = this.bodies;
     let any = false;
-    for (const b of this.bodies) {
-      if (b.sleeping) {
+    for (let i = 0; i < bodies.length; i++) {
+      if (bodies[i]!.sleeping) {
         any = true;
         break;
       }
     }
     if (!any) return;
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const c of this.contacts) {
-        if (c.count === 0 || c.sensor) continue;
-        if (wakePair(c.a, c.b)) changed = true;
+    // The woken set is everything reachable from an active body through non-sensor contacts with points and joints
+    // (woken dynamics are active too), so walk the graph from each active body instead of iterating to a fixed point.
+    const stack = this.wakeStack;
+    for (let i = 0; i < bodies.length; i++) {
+      const seed = bodies[i]!;
+      if (!isActive(seed)) continue;
+      stack.push(seed);
+      while (stack.length) {
+        const b = stack.pop()!;
+        const edges = b.contactEdges;
+        for (let k = 0; k < edges.length; k++) {
+          const c = edges[k]!;
+          if (c.count === 0 || c.sensor) continue;
+          const o = c.a === b ? c.b : c.a;
+          if (o.sleeping) {
+            o.sleeping = false;
+            stack.push(o);
+          }
+        }
+        const joints = b.joints;
+        for (let k = 0; k < joints.length; k++) {
+          const o = joints[k]!.other(b);
+          if (o.sleeping) {
+            o.sleeping = false;
+            stack.push(o);
+          }
+        }
       }
-      for (const j of this.joints) if (wakePair(j.a, j.b)) changed = true;
     }
   }
 
   /** Joints to solve this substep (an awake dynamic body on either side); prepares them and warm starts. */
-  private prepareJoints(h: number): RigidJoint[] {
+  private prepareJoints(h: number): void {
     const list = this.jointList;
-    list.length = 0;
-    if (this.joints.length === 0) return list;
+    const joints = this.joints;
+    let n = 0;
     const warm = this.warmStarting;
-    for (const j of this.joints) {
+    for (let i = 0; i < joints.length; i++) {
+      const j = joints[i]!;
       if (j.broken || j.world !== this) continue;
       const a = j.a;
       const b = j.b;
       if ((a.type !== 'dynamic' || a.sleeping) && (b.type !== 'dynamic' || b.sleeping)) continue;
       j.prepare(h, warm);
-      list.push(j);
+      list[n++] = j;
     }
-    return list;
+    this.jointCount = n;
   }
 
   /** Marks joints whose reaction exceeded their limits as broken; they leave the world at the end of the step. */
   private checkJointBreaks(): void {
-    for (const j of this.jointList) {
+    const list = this.jointList;
+    const n = this.jointCount;
+    for (let i = 0; i < n; i++) {
+      const j = list[i]!;
       if (j.breakForce === Infinity && j.breakTorque === Infinity) continue;
       if (j.reactionForce() <= j.breakForce && Math.abs(j.reactionTorque()) <= j.breakTorque) continue;
       j.broken = true;
@@ -933,11 +1133,13 @@ export class RigidWorld implements System {
 
   private prepareContacts(h: number): void {
     const list = this.solverList;
-    list.length = 0;
+    const contacts = this.contacts;
+    let count = 0;
     // Contacts with static/kinematic bodies go last: Gauss-Seidel favours the last constraint, so walls and floors win.
     let fixed = 0;
     for (let pass = 0; pass < 2; pass++) {
-      for (const c of this.contacts) {
+      for (let i = 0; i < contacts.length; i++) {
+        const c = contacts[i]!;
         if (c.count === 0 || c.sensor) continue;
         const a = c.a;
         const b = c.b;
@@ -945,14 +1147,16 @@ export class RigidWorld implements System {
         const dynB = b.type === 'dynamic' && !b.sleeping;
         if (!dynA && !dynB) continue;
         const both = a.type === 'dynamic' && b.type === 'dynamic';
-        if (both === (pass === 0)) list.push(c);
+        if (both === (pass === 0)) list[count++] = c;
         else if (pass === 0) fixed++;
       }
       if (fixed === 0) break;
     }
+    this.solverCount = count;
     const invH = 1 / h;
     const warm = this.warmStarting;
-    for (const c of list) {
+    for (let i = 0; i < count; i++) {
+      const c = list[i]!;
       const a = c.a;
       const b = c.b;
       const mA = a.invMass;
@@ -1009,7 +1213,8 @@ export class RigidWorld implements System {
       }
     }
     // Warm start in a separate pass so every relVel above is measured before any impulse is applied.
-    for (const c of list) {
+    for (let i = 0; i < count; i++) {
+      const c = list[i]!;
       const a = c.a;
       const b = c.b;
       const mA = a.invMass;
@@ -1036,7 +1241,10 @@ export class RigidWorld implements System {
   }
 
   private solveVelocities(): void {
-    for (const c of this.solverList) {
+    const list = this.solverList;
+    const n = this.solverCount;
+    for (let i = 0; i < n; i++) {
+      const c = list[i]!;
       const a = c.a;
       const b = c.b;
       const mA = a.invMass;
@@ -1162,7 +1370,10 @@ export class RigidWorld implements System {
   private applyRestitution(): void {
     const threshold = this.restitutionThreshold;
     const margin = this.contactMargin;
-    for (const c of this.solverList) {
+    const list = this.solverList;
+    const n = this.solverCount;
+    for (let i = 0; i < n; i++) {
+      const c = list[i]!;
       const e = c.restitution;
       if (e === 0) continue;
       const a = c.a;
@@ -1200,7 +1411,10 @@ export class RigidWorld implements System {
   /** Speculative points the solver had to stop are hits within this substep: they begin touching now. */
   private speculativeTouches(): void {
     const margin = this.contactMargin;
-    for (const c of this.solverList) {
+    const list = this.solverList;
+    const n = this.solverCount;
+    for (let i = 0; i < n; i++) {
+      const c = list[i]!;
       let hit = false;
       let approach = 0;
       for (let j = 0; j < c.solveCount; j++) {
@@ -1221,7 +1435,7 @@ export class RigidWorld implements System {
       this.substepBegins.push(e);
       if (c.touchStamp !== this.touchStamp) {
         c.touchStamp = this.touchStamp;
-        this.touches.push(c);
+        this.touches[this.touchCount++] = c;
       }
     }
   }
@@ -1232,7 +1446,10 @@ export class RigidWorld implements System {
     const baumgarte = this.baumgarte;
     const maxC = this.maxCorrection;
     let minSep = 0;
-    for (const c of this.solverList) {
+    const list = this.solverList;
+    const n = this.solverCount;
+    for (let i = 0; i < n; i++) {
+      const c = list[i]!;
       const a = c.a;
       const b = c.b;
       const mA = a.invMass;
@@ -1257,7 +1474,7 @@ export class RigidWorld implements System {
           const pby = b.y + b.s * p.lx + b.c * p.ly;
           const dx = pbx - pax;
           const dy = pby - pay;
-          const d = Math.hypot(dx, dy);
+          const d = Math.sqrt(dx * dx + dy * dy);
           if (d > 1e-12) {
             nx = dx / d;
             ny = dy / d;
@@ -1342,74 +1559,71 @@ export class RigidWorld implements System {
       if (!b.allowSleep || b.av * b.av > ang2 || b.vx * b.vx + b.vy * b.vy > lin2) b.sleepTime = 0;
       else b.sleepTime += h;
     }
-    const find = (i: number): number => {
-      while (parent[i] !== i) {
-        parent[i] = parent[parent[i]!]!;
-        i = parent[i]!;
-      }
-      return i;
-    };
-    const union = (a: RigidBody, b: RigidBody): void => {
-      if (a.type !== 'dynamic' || b.type !== 'dynamic') return;
-      const ra = find(a.slot);
-      const rb = find(b.slot);
-      if (ra !== rb) parent[ra < rb ? rb : ra] = ra < rb ? ra : rb;
-    };
-    for (const c of this.solverList) union(c.a, c.b);
-    for (const j of this.jointList) union(j.a, j.b);
+    const contacts = this.solverList;
+    const nContacts = this.solverCount;
+    const joints = this.jointList;
+    const nJoints = this.jointCount;
+    for (let i = 0; i < nContacts; i++) sleepUnion(parent, contacts[i]!.a, contacts[i]!.b);
+    for (let i = 0; i < nJoints; i++) sleepUnion(parent, joints[i]!.a, joints[i]!.b);
     for (let i = 0; i < n; i++) {
       const b = bodies[i]!;
       if (b.type !== 'dynamic' || b.sleeping) continue;
-      const r = find(i);
+      const r = sleepFind(parent, i);
       if (b.sleepTime < minSleep[r]!) minSleep[r] = b.sleepTime;
     }
-    // A moving kinematic keeps whatever it touches or is jointed to awake.
-    const kinematicWake = (a: RigidBody, b: RigidBody): void => {
-      const k = a.type === 'kinematic' ? a : b.type === 'kinematic' ? b : null;
-      if (!k || !isActive(k)) return;
-      const d = k === a ? b : a;
-      if (d.type === 'dynamic') minSleep[find(d.slot)] = 0;
-    };
-    for (const c of this.solverList) kinematicWake(c.a, c.b);
-    for (const j of this.jointList) kinematicWake(j.a, j.b);
+    for (let i = 0; i < nContacts; i++) kinematicWake(parent, minSleep, contacts[i]!.a, contacts[i]!.b);
+    for (let i = 0; i < nJoints; i++) kinematicWake(parent, minSleep, joints[i]!.a, joints[i]!.b);
     const limit = this.timeToSleep;
     for (let i = 0; i < n; i++) {
       const b = bodies[i]!;
       if (b.type !== 'dynamic' || b.sleeping) continue;
-      if (minSleep[find(i)]! >= limit) b.sleep();
+      if (minSleep[sleepFind(parent, i)]! >= limit) b.sleep();
     }
   }
 
   // ---------------------------------------------------------------- queries
 
   /** Bodies whose shape contains the point, in body order. */
-  queryPoint(x: number, y: number, opts: RigidQueryOptions = {}): RigidBody[] {
+  queryPoint(x: number, y: number, opts?: RigidQueryOptions): RigidBody[] {
     const out: RigidBody[] = [];
-    const mask = opts.mask ?? -1;
-    for (const b of this.bodies) {
-      if ((b.category & mask) === 0 || (b.sensor && !opts.sensors) || b === opts.ignore) continue;
+    const mask = opts?.mask ?? -1;
+    const sensors = opts?.sensors ?? false;
+    const ignore = opts?.ignore ?? null;
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (x < b.minX || x > b.maxX || y < b.minY || y > b.maxY) continue;
+      if ((b.category & mask) === 0 || (b.sensor && !sensors) || b === ignore) continue;
       if (b.containsPoint(x, y)) out.push(b);
     }
     return out;
   }
 
   /** Bodies whose AABB overlaps the rect (a superset of true shape overlaps), in body order. */
-  queryAABB(r: Rect, opts: RigidQueryOptions = {}): RigidBody[] {
+  queryAABB(r: Rect, opts?: RigidQueryOptions): RigidBody[] {
     const out: RigidBody[] = [];
-    const mask = opts.mask ?? -1;
+    const mask = opts?.mask ?? -1;
+    const sensors = opts?.sensors ?? false;
+    const ignore = opts?.ignore ?? null;
+    const x0 = r.x;
+    const y0 = r.y;
     const x1 = r.x + r.w;
     const y1 = r.y + r.h;
-    for (const b of this.bodies) {
-      if ((b.category & mask) === 0 || (b.sensor && !opts.sensors) || b === opts.ignore) continue;
-      if (b.minX <= x1 && b.maxX >= r.x && b.minY <= y1 && b.maxY >= r.y) out.push(b);
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
+      if (!(b.minX <= x1 && b.maxX >= x0 && b.minY <= y1 && b.maxY >= y0)) continue;
+      if ((b.category & mask) === 0 || (b.sensor && !sensors) || b === ignore) continue;
+      out.push(b);
     }
     return out;
   }
 
   /** Closest hit along the segment (x0,y0)-(x1,y1). Shapes containing the start point are not hit. */
-  raycast(x0: number, y0: number, x1: number, y1: number, opts: RigidQueryOptions = {}): RigidRayHit | null {
-    const mask = opts.mask ?? -1;
+  raycast(x0: number, y0: number, x1: number, y1: number, opts?: RigidQueryOptions): RigidRayHit | null {
+    const mask = opts?.mask ?? -1;
+    const sensors = opts?.sensors ?? false;
+    const ignore = opts?.ignore ?? null;
     const sx0 = Math.min(x0, x1);
     const sx1 = Math.max(x0, x1);
     const sy0 = Math.min(y0, y1);
@@ -1419,10 +1633,13 @@ export class RigidWorld implements System {
     let fraction = 1;
     let nx = 0;
     let ny = 0;
-    for (const b of this.bodies) {
-      if ((b.category & mask) === 0 || (b.sensor && !opts.sensors) || b === opts.ignore) continue;
+    const bodies = this.bodies;
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
       if (b.minX > sx1 || b.maxX < sx0 || b.minY > sy1 || b.maxY < sy0) continue;
-      if (rigidRaycastBody(ray, b, x0, y0, x1, y1, fraction) && (!best || ray.fraction < fraction)) {
+      if ((b.category & mask) === 0 || (b.sensor && !sensors) || b === ignore) continue;
+      ray.fraction = fraction;
+      if (rigidRaycastBody(ray, b, x0, y0, x1, y1) && (!best || ray.fraction < fraction)) {
         best = b;
         fraction = ray.fraction;
         nx = ray.nx;
@@ -1432,7 +1649,7 @@ export class RigidWorld implements System {
     if (!best) return null;
     const dx = x1 - x0;
     const dy = y1 - y0;
-    return { body: best, x: x0 + dx * fraction, y: y0 + dy * fraction, nx, ny, fraction, distance: fraction * Math.hypot(dx, dy) };
+    return { body: best, x: x0 + dx * fraction, y: y0 + dy * fraction, nx, ny, fraction, distance: fraction * Math.sqrt(dx * dx + dy * dy) };
   }
 
   // ---------------------------------------------------------------- debugging
@@ -1471,15 +1688,27 @@ function shouldCollide(a: RigidBody, b: RigidBody): boolean {
   return (a.category & b.mask) !== 0 && (b.category & a.mask) !== 0;
 }
 
-/** Wakes the sleeping side of a pair whose other side is active (propagateWake). */
-function wakePair(a: RigidBody, b: RigidBody): boolean {
-  if (a.sleeping && !b.sleeping && isActive(b)) {
-    a.sleeping = false;
-    return true;
+// Union-find over body slots for island sleeping (updateSleep).
+
+function sleepFind(parent: Int32Array, i: number): number {
+  while (parent[i] !== i) {
+    parent[i] = parent[parent[i]!]!;
+    i = parent[i]!;
   }
-  if (b.sleeping && !a.sleeping && isActive(a)) {
-    b.sleeping = false;
-    return true;
-  }
-  return false;
+  return i;
+}
+
+function sleepUnion(parent: Int32Array, a: RigidBody, b: RigidBody): void {
+  if (a.type !== 'dynamic' || b.type !== 'dynamic') return;
+  const ra = sleepFind(parent, a.slot);
+  const rb = sleepFind(parent, b.slot);
+  if (ra !== rb) parent[ra < rb ? rb : ra] = ra < rb ? ra : rb;
+}
+
+/** A moving kinematic keeps whatever it touches or is jointed to awake. */
+function kinematicWake(parent: Int32Array, minSleep: Float64Array, a: RigidBody, b: RigidBody): void {
+  const k = a.type === 'kinematic' ? a : b.type === 'kinematic' ? b : null;
+  if (!k || !isActive(k)) return;
+  const d = k === a ? b : a;
+  if (d.type === 'dynamic') minSleep[sleepFind(parent, d.slot)] = 0;
 }

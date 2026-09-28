@@ -30,6 +30,17 @@ Two systems live in `engine/world/` and are exported from `'@engine'`:
 Rule of thumb: character controllers on tile maps -> `PhysicsWorld`. Anything that must stack, roll or rotate ->
 `RigidWorld`. Do not mix the two on the same objects.
 
+Arcade performance notes: a `PhysicsWorld` step allocates next to nothing: the `SpatialHash` broadphase reuses
+its cells and per-body records across `clear()` (bodies that stay in their cells skip the map lookups), the narrow
+phase writes into scratch results, and `ArcadeCollision` payloads are only built when someone receives them
+(`onCollide` / `onOverlap` on either body, or a `'collide'` / `'overlap'` listener), so leave unused callbacks `null`
+and poll `touching` / `blocked` instead. 400 piled bodies (40 px boxes and r16 circles on a tile map) cost about
+0.4 ms per step headless and ~35 KB of garbage (50 bodies: ~0.03 ms, ~4 KB). Queries take an optional `out` array
+that results are appended to (`queryPoint(x, y, mask, out)`, `queryRect(r, mask, out)`, `queryCircle(x, y, r,
+mask, out)`); `SpatialHash.queryInto(r, out)` overwrites `out` and returns the count, and the `collide.ts` overlap /
+segment helpers take an optional `out` object. Keep `cellSize` (default 128) at 2-4x the typical body size; the
+cell layout sets the pair order, so changing it changes trajectories (replays recorded with another size diverge).
+
 Reference implementations: `sandbox/scenes/physics.ts` ('rigid-stack', 'rigid-plinko', 'rigid-joints'), the 合成大西瓜
 adapter `game/physics.ts`, tests `engine/world/rigid.test.ts` and `engine/world/rigid-joint.test.ts` (joints, presets).
 
@@ -83,6 +94,9 @@ Shapes are immutable and shareable. To resize a body use `body.setShape(rigidCir
   of latency). Custom drawing should do the same: `x = b.prevX + (b.x - b.prevX) * world.alpha`.
 - `substeps` splits each step into N collide + solve passes: stiffer piles and less tunnelling, linear cost.
 - Deterministic: no randomness, insertion-order iteration, ids assigned on add. Same inputs -> same `dump()`.
+  Lengths use `Math.sqrt(x * x + y * y)`, never `Math.hypot` (sqrt is correctly rounded everywhere, hypot differs
+  between V8 and JavaScriptCore by an ulp, which a replay amplifies); keep that in rigid code. `Math.sin/cos` still
+  vary by engine, so only same-engine replays are guaranteed bit-identical.
 - Pre-warm a demo so screenshots show a settled state: `for (let i = 0; i < 120; i++) world.step();`.
 - `world.paused = true` freezes `update()`.
 
@@ -185,13 +199,17 @@ body.setPosition(x, y, angle);                    // teleport: no interpolation 
 
 Options for queries: `mask`, `sensors` (include sensors, default false), `ignore`. A ray that starts inside a shape
 does not hit that shape. Queries never wake anything; the body methods above do. Plain writes to `body.x` neither
-wake nor update the AABB, so always go through `setPosition`.
+wake nor update the AABB, so always go through `setPosition`. Each query tests every body's AABB (no broadphase,
+results in body order) and allocates only its result: about 2-5 µs per call with 400 bodies, fine for taps and a
+few rays per frame.
 
 ## Sleeping
 
 Island sleeping: a group of touching bodies sleeps when every body is slower than `sleepLinear` / `sleepAngular`
 for `timeToSleep` seconds. Sleeping bodies cost nothing to simulate and are woken by contact begin/end, a removed
-support, impulses/forces/velocity/teleport, and `setShape`. `allowSleep: false` per body (e.g. the player) or per
+support, impulses/forces/velocity/teleport, and `setShape`. When every dynamic body sleeps and no kinematic moves,
+a step only re-lists the resting contacts in `touches` (about 0.02 ms for 400 settled bodies), so a settled level
+is nearly free. `allowSleep: false` per body (e.g. the player) or per
 world. `awake: false` starts a pre-settled stack asleep. Jointed bodies share an island, so a ragdoll or bridge sleeps
 and wakes as one.
 
@@ -419,8 +437,11 @@ console.log(bridge.bodies.length, bridge.joints.length, tail.bodies.at(-1)!.y); 
 | `warmStarting` (true) | never turn off except to debug | off = much softer stacks |
 
 Scale: everything is in design units (750x1334 screen). Gravity 1600-2600 feels right for phone-sized objects;
-objects 20-200 units across. Perf: ~200 mixed bodies at 60 Hz cost about 1.2-1.5 ms per step in node (headless,
-busy machine); the fruit jar with 2 substeps is about 0.1 ms per step.
+objects 20-200 units across. Perf (node, headless, busy machine): ~200 mixed bodies at 60 Hz cost about
+0.7-1.5 ms per step, 400 boxes 2-3 ms, 400 fruit piled in a jar with 2 substeps about 2 ms; the fruit jar game is
+under 0.1 ms per step. The broadphase sweeps along the axis the non-static bodies spread over most (a tall pile
+sweeps vertically), so crowded piles stay close to linear. Steps allocate little (about 4 KB per step for the fruit
+jar, 30-60 KB with 400 awake bodies, almost nothing asleep), so GC pauses stay rare.
 
 ## Pitfalls
 

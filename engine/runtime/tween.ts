@@ -1,8 +1,9 @@
 import { parseColor, toCss, type Color, type RGBA } from '../core/color';
-import type { Game } from '../core/game';
+import { Game } from '../core/game';
 import { Node } from '../scene/node';
+import { Scene } from '../scene/scene';
 import { getEase, type Ease, type EaseFn } from './ease';
-import { getTicker, isThenable, isTreePaused, resolveGame, TIME_EPS, type Tickable } from './ticker';
+import { getTicker, invalidatePauseCache, isThenable, ownerPaused, resolveGame, TIME_EPS, type Tickable } from './ticker';
 import { after, type Timer } from './timers';
 
 /** A target value: a number, a relative string ('+=50', '-=10', '*=2'), a color string, or a nested object of those. */
@@ -92,6 +93,8 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
   private readonly steps: Step[] = [];
   private total = 0;
   private time: number;
+  /** Play position handed to runForward / runReverse (a field: numbers passed to non-inlined calls get boxed). */
+  private playhead = 0;
   private iteration = 0;
   private cursor = 0;
   private repeats: number;
@@ -203,7 +206,10 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
     }
     this.state = 'killed';
     this.unregisterAll();
-    this.onKill?.();
+    if (this.onKill) {
+      this.onKill();
+      invalidatePauseCache();
+    }
   }
 
   /** Resolves when the tween completes (never if it is killed). */
@@ -231,7 +237,7 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
         this.kill();
         return false;
       }
-      if (isTreePaused(o)) return true;
+      if (ownerPaused(o)) return true;
     }
     if (this._paused) return true;
     this.time += dt * this.timeScale;
@@ -253,10 +259,18 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
   private evaluate(): void {
     for (let guard = 0; this.state === 'running' && this.time >= -TIME_EPS; guard++) {
       const t = Math.max(0, Math.min(this.time, this.total));
-      if (this.forward) this.runForward(t);
-      else this.runReverse(this.total - t);
+      if (this.forward) {
+        this.playhead = t;
+        this.runForward();
+      } else {
+        this.playhead = this.total - t;
+        this.runReverse();
+      }
       if (this.state !== 'running') return;
-      this.onUpdate?.(this.total > 0 ? t / this.total : 1);
+      if (this.onUpdate) {
+        this.onUpdate(this.total > 0 ? t / this.total : 1);
+        invalidatePauseCache();
+      }
       if (this.time < this.total - TIME_EPS) return;
       if (this.iteration >= this.repeats) {
         this.finish();
@@ -269,7 +283,8 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
     }
   }
 
-  private runForward(t: number): void {
+  private runForward(): void {
+    const t = this.playhead;
     const steps = this.steps;
     while (this.cursor < steps.length) {
       const s = steps[this.cursor]!;
@@ -280,6 +295,7 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
         applyTracks(s.tracks, s.ease(complete ? 1 : (t - s.start) / s.dur));
       } else if (s.kind === 'call') {
         s.fn!();
+        invalidatePauseCache();
         if (this.state !== 'running') return;
       }
       if (!complete) return;
@@ -287,7 +303,8 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
     }
   }
 
-  private runReverse(t: number): void {
+  private runReverse(): void {
+    const t = this.playhead;
     const steps = this.steps;
     while (this.cursor >= 0) {
       const s = steps[this.cursor]!;
@@ -302,7 +319,10 @@ export class Tween<T extends object = object> implements Tickable, TweenLike {
   private finish(): void {
     this.state = 'done';
     this.unregisterAll();
-    this.onComplete?.();
+    if (this.onComplete) {
+      this.onComplete();
+      invalidatePauseCache();
+    }
     this.resolveDone?.();
   }
 
@@ -359,17 +379,19 @@ function makeTrack(obj: Record<string, unknown>, key: string, v: number | string
   throw new Error(`tween: can't animate "${key}" (${typeof cur}) to "${v}"`);
 }
 
+const mixed: RGBA = { r: 0, g: 0, b: 0, a: 1 };
+
 function applyTracks(tracks: Track[], e: number): void {
-  for (const tr of tracks) {
-    if (tr.c0) {
-      const a = tr.c0;
+  for (let i = 0; i < tracks.length; i++) {
+    const tr = tracks[i]!;
+    const a = tr.c0;
+    if (a) {
       const b = tr.c1!;
-      tr.obj[tr.key] = toCss({
-        r: a.r + (b.r - a.r) * e,
-        g: a.g + (b.g - a.g) * e,
-        b: a.b + (b.b - a.b) * e,
-        a: a.a + (b.a - a.a) * e,
-      });
+      mixed.r = a.r + (b.r - a.r) * e;
+      mixed.g = a.g + (b.g - a.g) * e;
+      mixed.b = a.b + (b.b - a.b) * e;
+      mixed.a = a.a + (b.a - a.a) * e;
+      tr.obj[tr.key] = toCss(mixed);
     } else {
       tr.obj[tr.key] = tr.from + (tr.to - tr.from) * e;
     }
@@ -438,15 +460,38 @@ export interface TweenGroupOptions {
   game?: Game;
   /** Waits (number items) use unscaled time. */
   realtime?: boolean;
+  /**
+   * Killed (no further items, waits or callbacks) when this node is destroyed; waits freeze while its subtree is
+   * paused. Default: the scene of the first node its tweens animate (that node itself when it is in no scene), else
+   * the top scene when the group is created. `null`: app-level, keeps running across scene changes until it finishes
+   * or is killed.
+   */
+  owner?: Node | null;
+}
+
+function sceneOf(node: Node): Scene | null {
+  for (let n: Node | null = node; n; n = n.parent) if (n instanceof Scene) return n;
+  return null;
+}
+
+function defaultGroupOwner(items: TweenItem[], game: Game | undefined): Node | null {
+  for (const it of items) {
+    const n = it instanceof Tween || it instanceof TweenGroup ? it.owner : null;
+    if (n) return sceneOf(n) ?? n;
+  }
+  return (game ?? Game.current)?.scenes.top ?? null;
 }
 
 /** A sequence or parallel set of tweens; awaitable and killable. Created by sequence() / parallel(). */
 export class TweenGroup implements TweenLike {
   readonly done: Promise<void>;
+  /** The group is killed when this node is destroyed (see TweenGroupOptions.owner). */
+  readonly owner: Node | null;
   private state: 'idle' | 'running' | 'done' | 'killed' = 'idle';
   private held = false;
   private live = new Set<Tween<any> | TweenGroup | Timer>();
   private resolveDone!: () => void;
+  private offOwner: (() => void) | null = null;
 
   constructor(
     readonly mode: 'sequence' | 'parallel',
@@ -458,6 +503,9 @@ export class TweenGroup implements TweenLike {
       if (it instanceof Tween) it.pause();
       else if (it instanceof TweenGroup) it.held = true;
     }
+    this.owner = opts.owner !== undefined ? opts.owner : defaultGroupOwner(items, opts.game);
+    if (this.owner?.destroyed) this.kill();
+    else if (this.owner) this.offOwner = this.owner.once('destroyed', () => this.kill());
     void Promise.resolve().then(() => {
       if (!this.held) this.start();
     });
@@ -475,6 +523,7 @@ export class TweenGroup implements TweenLike {
   kill(): void {
     if (this.state === 'done' || this.state === 'killed') return;
     this.state = 'killed';
+    this.releaseOwner();
     for (const it of this.items) if (it instanceof Tween || it instanceof TweenGroup) it.kill();
     for (const it of this.live) {
       if (it instanceof Tween || it instanceof TweenGroup) it.kill();
@@ -497,8 +546,14 @@ export class TweenGroup implements TweenLike {
     void run.then(() => {
       if (this.state !== 'running') return;
       this.state = 'done';
+      this.releaseOwner();
       this.resolveDone();
     });
+  }
+
+  private releaseOwner(): void {
+    this.offOwner?.();
+    this.offOwner = null;
   }
 
   private async runSequence(): Promise<void> {
@@ -515,7 +570,7 @@ export class TweenGroup implements TweenLike {
         const tm = after(it, () => {
           this.live.delete(tm);
           resolve();
-        }, { game: this.opts.game, realtime: this.opts.realtime });
+        }, { game: this.opts.game, realtime: this.opts.realtime, owner: this.owner });
         this.live.add(tm);
       });
     }
@@ -539,12 +594,15 @@ export class TweenGroup implements TweenLike {
   }
 }
 
-/** Runs items one after another: `await sequence([tween(a, {x: 100}, 0.3), 0.2, () => flash()])`. */
+/**
+ * Runs items one after another: `await sequence([tween(a, {x: 100}, 0.3), 0.2, () => flash()])`.
+ * Dies with its scene (see TweenGroupOptions.owner); pass `{ owner: null }` for groups that outlive scene changes.
+ */
 export function sequence(items: TweenItem[], opts?: TweenGroupOptions): TweenGroup {
   return new TweenGroup('sequence', items, opts);
 }
 
-/** Runs items at the same time; resolves when all finished. */
+/** Runs items at the same time; resolves when all finished. Owned like sequence(). */
 export function parallel(items: TweenItem[], opts?: TweenGroupOptions): TweenGroup {
   return new TweenGroup('parallel', items, opts);
 }

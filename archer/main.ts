@@ -15,9 +15,11 @@ export default defineApp({
   scenes: {
     play: () => new PlayScene(),
     duo: () => new DuoScene(),
-    gallery: () => new GalleryScene(),
-    'menu-preview': () => new MenuPreviewScene(),
   },
+  devScenes:
+    process.env.NODE_ENV === 'production'
+      ? undefined
+      : { gallery: () => new GalleryScene(), 'menu-preview': () => new MenuPreviewScene() },
   start: 'play',
   boot(game) {
     setUITheme('dark');

@@ -1,13 +1,14 @@
 ---
 name: audio-design
-description: Designs, renders, checks and plays game sound with the engine's audio module - parametric sound effects (SfxParams, layers, sfxPresets, mutateSfx), music written as text notation (defineSong with tracks, chord symbols, drums, sections, arrangement), the pnpm audio CLI that renders MP3s plus a manifest and prints a loudness/clipping/key analysis table with preview PNGs, and the runtime AudioManager (playSfx with rate/volume/cooldown, playMusic with cross-fades, master/music/sfx mute and volume persisted, preload, web autoplay unlock, synth fallback) within the package size budget. Use when adding or changing sound effects, background music, jingles, UI clicks, mute/volume settings, or when audio is too loud, too quiet, clipping, late, off-key, repetitive or missing on a device ("sound", "sfx", "audio", "music", "bgm", "jingle", "volume", "mute", "音效", "音乐", "背景音乐", "声音", "静音", "配乐").
+description: Designs, renders, checks and plays game sound with the engine's audio module - parametric sound effects (SfxParams, layers, sfxPresets, mutateSfx), music written as text notation (defineSong with tracks, chord symbols, drums, sections, arrangement), the pnpm audio CLI that renders MP3s plus a manifest and prints a loudness/clipping/key analysis table with preview PNGs, and the runtime AudioManager (playSfx with rate/volume/cooldown, playMusic with cross-fades, master/music/sfx mute and volume persisted, sfx preload, streamed music with delayed unload, web autoplay unlock, dev-only synth fallback, release manifest check) within the package size budget. Use when adding or changing sound effects, background music, jingles, UI clicks, mute/volume settings, or when audio is too loud, too quiet, clipping, late, off-key, repetitive or missing on a device ("sound", "sfx", "audio", "music", "bgm", "jingle", "volume", "mute", "音效", "音乐", "背景音乐", "声音", "静音", "配乐").
 ---
 
 # Audio design
 
 Sounds are data in `<app>/audio/index.ts`: `sfx` (SfxParams) and `music` (SongDef). `pnpm audio --app <app>`
 renders them to `<app>/assets/audio/*.mp3` + `manifest.json` and prints an analysis you can judge without
-listening. At runtime the `AudioManager` plays the files (or synthesizes missing ones from the same library).
+listening. At runtime the `AudioManager` plays the files (dev builds also synthesize missing ones from the same
+library; release builds only play files).
 All names are exported from `'@engine'` (source `engine/audio/`). Worked example: `game/audio/index.ts`
 (10 sfx tuned to F major + a 44 s five-section loop) and its contract test `game/audio/audio.test.ts`.
 Timing sounds to hits, squash and shake is covered by the `game-feel` skill.
@@ -26,7 +27,8 @@ Timing sounds to hits, squash and shake is covered by the `game-feel` skill.
    (waveform, spectrogram, piano roll for songs).
 5. **Test** lengths, verdicts, key and loop seam with `renderSfx`/`renderSong` + `analyzeAudio` (pattern of
    `game/audio/audio.test.ts`), and `t.played()` in gameplay tests.
-6. **Play** through the AudioManager; commit the rendered MP3s and manifest so builds ship them.
+6. **Play** through the AudioManager; commit the rendered MP3s and manifest so builds ship them (release builds
+   fail when the manifest misses a library sound).
 
 ## Define sounds
 
@@ -121,8 +123,7 @@ import { createAudioManager, playSound, uiEvents, type Game } from '@engine';
 import { music, sfx } from './audio/index';
 
 export function setupAudio(game: Game): void {
-  const audio = createAudioManager(game, { library: { sfx, music } });
-  void audio.preload();
+  createAudioManager(game, { library: { sfx, music } }); // starts loading every sfx
   uiEvents.on('tap', () => playSound('click'));
 }
 
@@ -132,20 +133,32 @@ export function onMerge(level: number, combo: number): void {
 }
 ```
 
-- Call `setupAudio(game)` from the app's `boot()`. Always pass `library`: without it, sounds missing from the
-  manifest are silent. Game code plays through the shortcuts `playSound` / `playSong` / `stopSong` /
-  `isAudioMuted` / `setAudioMuted` (no-ops when no manager exists); use `getAudioManager()` only for the rest of
-  the manager API (volumes, preload).
+- Call `setupAudio(game)` from the app's `boot()`. Pass `library` so dev builds can synthesize sounds missing from
+  the manifest (release builds cannot: see below). Game code plays through the shortcuts `playSound` /
+  `playSong` / `stopSong` / `isAudioMuted` / `setAudioMuted` (no-ops when no manager exists); use
+  `getAudioManager()` only for the rest of the manager API (volumes, preload, unload).
 - `playSfx(name, { volume, rate, pitchJitter, cooldownMs, maxVoices })` returns `null` when skipped (muted,
-  hidden, within the 40 ms cooldown, or not loaded: the first call only starts loading). `preload()` at boot
-  avoids missing the first play. Max 4 voices per sfx by default (oldest stops).
+  hidden, within the 40 ms cooldown, or not loaded: the first call only starts loading). The manager preloads
+  every sfx once the manifest is read (`preloadSfx: false` opts out; then call `preload([...])` yourself). Max 4
+  voices per sfx by default (oldest stops).
 - `playMusic(name, { fadeMs, volume, restart })` cross-fades (same track again is a no-op); `stopMusic(fadeMs)`.
+  Music is loaded on first play with the backend hint `{ stream: true }` (mini-games: a plain streamed
+  InnerAudioContext; web: the MP3 is kept encoded and only the playing track is decoded). A track that stopped or
+  faded out is unloaded `musicUnloadMs` later (default 4000; `Infinity` keeps it) unless it plays again first, so
+  switching tracks does not keep every decoded loop in memory. `unload(name)` frees any sound now.
+- Mini-games: sfx get `useWebAudioImplement` contexts (fully decoded, low latency) on wx; a looping play never
+  reuses one of those. `innerAudioOption` in `app.json` (for example `{ "obeyMuteSwitch": false }`) is passed to
+  `setInnerAudioOption` at startup (device behaviour unverified).
 - Settings: `isMuted/setMuted/toggleMute('master' | 'music' | 'sfx')`, `getVolume/setVolume`, persisted under
   `audio.settings`; `on('settings', ...)` fires on changes. Wire toggles as in `game/scenes/play.ts` `openPause`.
 - Web: the AudioContext starts suspended and unlocks on the first tap/click/key, so music requested on the title
   screen becomes audible at the first gesture. Hide/show (app background) pauses and resumes automatically.
 - The synth fallback renders at runtime on the main thread (a song takes noticeable time on phones): it is a dev
-  convenience. Run `pnpm audio --app <app>` before every build so the MP3s exist.
+  convenience only (dev server, tests, shots). Release builds compile it out, replace the library imported by
+  `<app>/main.ts` with an empty one, and fail when `assets/audio/manifest.json` misses a library sound, has the
+  wrong kind or a missing file. Run `pnpm audio --app <app>` after every sound change and commit the output.
+- Keep `<app>/audio/index.ts` exporting only `sfx` and `music` (named or as default): with other exports the build
+  keeps the whole library in the release bundle (it warns).
 
 ## Budget
 

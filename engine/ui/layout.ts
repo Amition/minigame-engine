@@ -180,6 +180,33 @@ interface ItemState {
   iw: number;
   ih: number;
   visible: boolean;
+  /** Pass whose measurements start at arena entry `mh` (0 = none). */
+  mp: number;
+  mh: number;
+  /** Pass of the last layoutUINode() (0 = outside a pass). */
+  lp: number;
+  /** Change watch list while this node is a layout root. */
+  watch: RootWatch | null;
+  /** Text only: what its last pass asked and got. */
+  text: TextRecord | null;
+}
+
+/**
+ * Everything the measurements of a Text in one pass read from its content, kept after the pass: a new text that
+ * reads the same gives the same measurements, so Label can apply it in place.
+ */
+interface TextRecord {
+  pass: number;
+  /** measureNatural() size (NaN = not read). */
+  natW: number;
+  natH: number;
+  /** measureWrapped(width).height reads as [width, height] pairs. */
+  wraps: number[];
+  wn: number;
+  /** minContentWidth() (NaN = not read). */
+  mcw: number;
+  /** Width given by layoutUINode() in the pass. */
+  lw: number;
 }
 
 const states = new WeakMap<Node, ItemState>();
@@ -187,30 +214,67 @@ const states = new WeakMap<Node, ItemState>();
 function state(n: Node): ItemState {
   let s = states.get(n);
   if (!s) {
-    s = { w: n.width, h: n.height, iw: n.width, ih: n.height, visible: n.visible };
+    s = { w: n.width, h: n.height, iw: n.width, ih: n.height, visible: n.visible, mp: 0, mh: -1, lp: 0, watch: null, text: null };
     states.set(n, s);
   }
   return s;
 }
 
-function intrinsic(n: Node): Size {
+/** State with `iw`/`ih` refreshed when the leaf was resized from outside since the last layout. */
+function intrinsic(n: Node): ItemState {
   const s = state(n);
   if (n.width !== s.w || n.height !== s.h) {
     s.iw = s.w = n.width;
     s.ih = s.h = n.height;
   }
-  return { w: s.iw, h: s.ih };
+  return s;
 }
 
-let cache: Map<Node, { k: number[]; r: Size }[]> | null = null;
+/** Id of the running layout pass (0 = none): measurements are cached per node within a pass. */
+let passId = 0;
+let passSeq = 0;
 let passDepth = 0;
 
+/**
+ * Measurement cache of the running pass: entry e has 6 keys at `arenaKeys[e * 6]`, its result and the index of the
+ * same node's previous entry (-1 = none). The number arrays are reused by later passes (up to ARENA_KEEP entries).
+ */
+const arenaKeys: number[] = [];
+const arenaRes: Size[] = [];
+const arenaNext: number[] = [];
+let arenaTop = 0;
+const ARENA_KEEP = 1024;
+
 function beginPass(): void {
-  if (passDepth++ === 0) cache = new Map();
+  if (passDepth++ === 0) {
+    passId = ++passSeq;
+    arenaTop = 0;
+  }
 }
 
 function endPass(): void {
-  if (--passDepth === 0) cache = null;
+  if (--passDepth > 0) return;
+  passId = 0;
+  arenaRes.length = 0;
+  if (arenaTop > ARENA_KEEP) {
+    arenaKeys.length = 0;
+    arenaNext.length = 0;
+  }
+  arenaTop = 0;
+}
+
+/** Starts the node's measurements for the running pass. */
+function claimMeasures(n: Node, s: ItemState): void {
+  if (s.mp === passId) return;
+  s.mp = passId;
+  s.mh = -1;
+  if (n instanceof Text) {
+    const t = (s.text ??= { pass: 0, natW: NaN, natH: NaN, wraps: [0, 0], wn: 0, mcw: NaN, lw: 0 });
+    t.pass = passId;
+    t.natW = t.natH = NaN;
+    t.wn = 0;
+    t.mcw = NaN;
+  }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -222,26 +286,39 @@ function res(v: UISize | UIOffset | undefined, base: number): number {
   return isNaN(base) || !isFinite(base) ? NaN : (n / 100) * base;
 }
 
+/** Writes padding/margin as [top, right, bottom, left] into `out`. */
+function edgesInto(v: UISpacing | undefined, out: number[]): number[] {
+  if (v === undefined) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+  } else if (!Array.isArray(v)) {
+    out[0] = out[1] = out[2] = out[3] = uiSpace(v);
+  } else if (v.length === 2) {
+    out[0] = out[2] = uiSpace(v[0]);
+    out[1] = out[3] = uiSpace(v[1]);
+  } else {
+    out[0] = uiSpace(v[0]);
+    out[1] = uiSpace(v[1]);
+    out[2] = uiSpace(v[2]);
+    out[3] = uiSpace(v[3]);
+  }
+  return out;
+}
+
+/** Scratch edges: read the four values right away, before anything that may lay out again. */
+const E: number[] = [0, 0, 0, 0];
+
 /** Resolves padding/margin to [top, right, bottom, left]. */
 export function uiEdges(v: UISpacing | undefined): [number, number, number, number] {
-  if (v === undefined) return [0, 0, 0, 0];
-  if (!Array.isArray(v)) {
-    const s = uiSpace(v);
-    return [s, s, s, s];
-  }
-  if (v.length === 2) {
-    const a = uiSpace(v[0]);
-    const b = uiSpace(v[1]);
-    return [a, b, a, b];
-  }
-  return [uiSpace(v[0]), uiSpace(v[1]), uiSpace(v[2]), uiSpace(v[3])];
+  return edgesInto(v, [0, 0, 0, 0]) as [number, number, number, number];
 }
 
-function padOf(n: Node): [number, number, number, number] {
-  return isUIHost(n) ? uiEdges(n.layout.values.padding) : [0, 0, 0, 0];
+function padInto(n: Node, out: number[]): number[] {
+  if (isUIHost(n)) return edgesInto(n.layout.values.padding, out);
+  out[0] = out[1] = out[2] = out[3] = 0;
+  return out;
 }
 
-const same = (a: number, b: number) => a === b || (isNaN(a) && isNaN(b));
+const same = (a: number, b: number) => a === b || (a !== a && b !== b);
 
 function positionOf(n: Node): UIPosition {
   return props(n).position ?? 'flow';
@@ -262,22 +339,48 @@ export function measureUINode(
   forceW = NaN,
   forceH = NaN,
 ): Size {
-  if (!cache) return measureRaw(n, availW, availH, baseW, baseH, forceW, forceH);
-  const k = [availW, availH, baseW, baseH, forceW, forceH];
-  let list = cache.get(n);
-  if (list) {
-    for (const e of list) {
-      let ok = true;
-      for (let i = 0; i < 6; i++) if (!same(e.k[i]!, k[i]!)) ok = false;
-      if (ok) return e.r;
+  if (passId === 0) return measureRaw(n, availW, availH, baseW, baseH, forceW, forceH);
+  const s = state(n);
+  claimMeasures(n, s);
+  const k = arenaKeys;
+  for (let e = s.mh; e >= 0; e = arenaNext[e]!) {
+    const o = e * 6;
+    if (
+      same(k[o]!, availW) &&
+      same(k[o + 1]!, availH) &&
+      same(k[o + 2]!, baseW) &&
+      same(k[o + 3]!, baseH) &&
+      same(k[o + 4]!, forceW) &&
+      same(k[o + 5]!, forceH)
+    ) {
+      return arenaRes[e]!;
     }
-  } else cache.set(n, (list = []));
-  const r = measureRaw(n, availW, availH, baseW, baseH, forceW, forceH);
-  list.push({ k, r });
+  }
+  const r = measureRaw(n, availW, availH, baseW, baseH, forceW, forceH, s.text);
+  const e = arenaTop++;
+  const o = e * 6;
+  k[o] = availW;
+  k[o + 1] = availH;
+  k[o + 2] = baseW;
+  k[o + 3] = baseH;
+  k[o + 4] = forceW;
+  k[o + 5] = forceH;
+  arenaRes[e] = r;
+  arenaNext[e] = s.mh;
+  s.mh = e;
   return r;
 }
 
-function measureRaw(n: Node, availW: number, availH: number, baseW: number, baseH: number, forceW: number, forceH: number): Size {
+function measureRaw(
+  n: Node,
+  availW: number,
+  availH: number,
+  baseW: number,
+  baseH: number,
+  forceW: number,
+  forceH: number,
+  rec: TextRecord | null = null,
+): Size {
   const p = props(n);
   const minW = p.minWidth ?? 0;
   const maxW = p.maxWidth ?? Infinity;
@@ -297,14 +400,14 @@ function measureRaw(n: Node, availW: number, availH: number, baseW: number, base
   const fixedH = !isNaN(h);
   const aw = fixedW ? w : Math.max(0, Math.min(availW, maxW));
   const ah = fixedH ? h : Math.max(0, Math.min(availH, maxH));
-  let c = contentSize(n, aw, ah, fixedW, fixedH);
+  let c = contentSize(n, aw, ah, fixedW, fixedH, rec);
   const rw = fixedW ? w : clamp(c.w, minW, Math.max(minW, maxW));
   let rh: number;
   if (fixedH) rh = h;
   else {
     if (ar) rh = rw / ar;
     else {
-      if (!fixedW && Math.abs(rw - c.w) > 0.01) c = contentSize(n, rw, ah, true, false);
+      if (!fixedW && Math.abs(rw - c.w) > 0.01) c = contentSize(n, rw, ah, true, false, rec);
       rh = c.h;
     }
     rh = clamp(rh, minH, Math.max(minH, maxH));
@@ -312,24 +415,45 @@ function measureRaw(n: Node, availW: number, availH: number, baseW: number, base
   return { w: rw, h: rh };
 }
 
-function contentSize(n: Node, aw: number, ah: number, fixedW: boolean, fixedH: boolean): Size {
+/** Text height when wrapped at `w`, noted in `rec`. */
+function wrappedHeight(n: Text, w: number, rec: TextRecord | null): number {
+  const h = n.measureWrapped(w).height;
+  if (rec) {
+    const ws = rec.wraps;
+    for (let i = 0; i < rec.wn; i++) if (ws[i * 2] === w) return h;
+    ws[rec.wn * 2] = w;
+    ws[rec.wn * 2 + 1] = h;
+    rec.wn++;
+  }
+  return h;
+}
+
+function contentSize(n: Node, aw: number, ah: number, fixedW: boolean, fixedH: boolean, rec: TextRecord | null): Size {
   if (isUIHost(n)) {
-    const [t, r, b, l] = padOf(n);
+    const pd = padInto(n, E);
+    const t = pd[0]!;
+    const r = pd[1]!;
+    const b = pd[2]!;
+    const l = pd[3]!;
     const c = n.measureContent(Math.max(0, aw - l - r), Math.max(0, ah - t - b), fixedW, fixedH);
     return { w: c.w + l + r, h: c.h + t + b };
   }
   if (n instanceof Text) {
-    if (fixedW) return { w: aw, h: n.measureWrapped(aw).height };
+    if (fixedW) return { w: aw, h: wrappedHeight(n, aw, rec) };
     const nat = n.measureNatural();
+    if (rec) {
+      rec.natW = nat.width;
+      rec.natH = nat.height;
+    }
     if (nat.width <= aw + 0.5) return { w: nat.width, h: nat.height };
-    return { w: aw, h: n.measureWrapped(aw).height };
+    return { w: aw, h: wrappedHeight(n, aw, rec) };
   }
   const s = intrinsic(n);
   if (n instanceof Sprite) {
-    if (fixedW && !fixedH && s.w > 0) return { w: aw, h: (aw * s.h) / s.w };
-    if (fixedH && !fixedW && s.h > 0) return { w: (ah * s.w) / s.h, h: ah };
+    if (fixedW && !fixedH && s.iw > 0) return { w: aw, h: (aw * s.ih) / s.iw };
+    if (fixedH && !fixedW && s.ih > 0) return { w: (ah * s.iw) / s.ih, h: ah };
   }
-  return { w: fixedW ? aw : s.w, h: fixedH ? ah : s.h };
+  return { w: fixedW ? aw : s.iw, h: fixedH ? ah : s.ih };
 }
 
 /** Narrowest width of `n` (margins excluded) before its content overflows. */
@@ -341,10 +465,18 @@ export function minContentWidthOf(n: Node, baseW = NaN): number {
   if (!isNaN(ew)) return clamp(ew, lo, hi);
   let m: number;
   if (isUIHost(n)) {
-    const [, r, , l] = padOf(n);
+    const pd = padInto(n, E);
+    const r = pd[1]!;
+    const l = pd[3]!;
     m = n.minContentWidth() + l + r;
-  } else if (n instanceof Text) m = n.minContentWidth();
-  else m = intrinsic(n).w;
+  } else if (n instanceof Text) {
+    m = n.minContentWidth();
+    if (passId !== 0) {
+      const s = state(n);
+      claimMeasures(n, s);
+      s.text!.mcw = m;
+    }
+  } else m = intrinsic(n).iw;
   return clamp(m, lo, hi);
 }
 
@@ -356,9 +488,13 @@ export function flexMinContentWidth(host: UILayoutHost): number {
   let sum = 0;
   let max = 0;
   let count = 0;
-  for (const c of host.children) {
+  const kids = host.children;
+  for (let i = 0; i < kids.length; i++) {
+    const c = kids[i]!;
     if (!c.visible || positionOf(c) !== 'flow') continue;
-    const [, mr, , ml] = uiEdges(props(c).margin);
+    const m = edgesInto(props(c).margin, E);
+    const mr = m[1]!;
+    const ml = m[3]!;
     const v = minContentWidthOf(c) + ml + mr;
     sum += v;
     max = Math.max(max, v);
@@ -370,8 +506,9 @@ export function flexMinContentWidth(host: UILayoutHost): number {
 
 // ---------------------------------------------------------------- flex
 
+/** Per-child working data of flexLayout / stackLayout, taken from a pool that nested layouts share as a stack. */
 interface FlexItem {
-  n: Node;
+  n: Node | null;
   mMain: number;
   mCross: number;
   mMainStart: number;
@@ -391,27 +528,70 @@ interface FlexItem {
   shrink: number;
   frozen: boolean;
   viol: number;
+  /** stackLayout: measured size and margins. */
+  sw: number;
+  sh: number;
+  mt: number;
+  mr: number;
+  mb: number;
+  ml: number;
 }
 
-function resolveFlexible(line: FlexItem[], space: number): void {
+const pool: FlexItem[] = [];
+let poolTop = 0;
+
+function takeItem(n: Node): FlexItem {
+  let it = pool[poolTop];
+  if (it === undefined) {
+    it = {
+      n: null, mMain: 0, mCross: 0, mMainStart: 0, mCrossStart: 0, basis: 0, min: 0, max: 0, hypo: 0, main: 0, cross: 0,
+      crossFix: NaN, minCross: 0, maxCross: 0, stretch: false, align: 'start', grow: 0, shrink: 1, frozen: false, viol: 0,
+      sw: 0, sh: 0, mt: 0, mr: 0, mb: 0, ml: 0,
+    };
+    pool[poolTop] = it;
+  }
+  poolTop++;
+  it.n = n;
+  return it;
+}
+
+function releaseItems(from: number): void {
+  for (let i = from; i < poolTop; i++) pool[i]!.n = null;
+  poolTop = from;
+}
+
+/** Flex lines as a stack shared by nested layouts: [first item, end item, cross size] per line. */
+const lineBuf: number[] = [];
+let lineTop = 0;
+
+function pushLine(a: number, b: number): void {
+  lineBuf[lineTop++] = a;
+  lineBuf[lineTop++] = b;
+  lineBuf[lineTop++] = 0;
+}
+
+function resolveFlexible(a: number, b: number, space: number): void {
   let sumHypo = 0;
-  for (const it of line) sumHypo += it.hypo + it.mMain;
+  for (let i = a; i < b; i++) sumHypo += pool[i]!.hypo + pool[i]!.mMain;
   const growing = sumHypo < space;
-  for (const it of line) {
+  for (let i = a; i < b; i++) {
+    const it = pool[i]!;
     it.main = it.hypo;
     it.frozen = (growing ? it.grow : it.shrink) <= 0 || (growing ? it.basis > it.hypo : it.basis < it.hypo);
   }
   if (Math.abs(space - sumHypo) < 0.01) return;
-  for (let guard = 0; guard <= line.length; guard++) {
+  for (let guard = 0; guard <= b - a; guard++) {
     let free = space;
     let total = 0;
-    for (const it of line) {
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
       free -= it.mMain + (it.frozen ? it.main : it.basis);
       if (!it.frozen) total += growing ? it.grow : it.shrink * it.basis;
     }
     let any = false;
     let violation = 0;
-    for (const it of line) {
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
       if (it.frozen) continue;
       any = true;
       const f = growing ? it.grow : it.shrink * it.basis;
@@ -422,8 +602,17 @@ function resolveFlexible(line: FlexItem[], space: number): void {
       violation += it.viol;
     }
     if (!any || Math.abs(violation) < 0.01) break;
-    for (const it of line) if (!it.frozen && (violation > 0 ? it.viol > 0 : it.viol < 0)) it.frozen = true;
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
+      if (!it.frozen && (violation > 0 ? it.viol > 0 : it.viol < 0)) it.frozen = true;
+    }
   }
+}
+
+function measureMain(n: Node, row: boolean, crossRoom: number, baseW: number, baseH: number, crossFix: number): number {
+  return row
+    ? measureUINode(n, Infinity, crossRoom, baseW, baseH, NaN, crossFix).w
+    : measureUINode(n, crossRoom, Infinity, baseW, baseH, crossFix, NaN).h;
 }
 
 /**
@@ -431,10 +620,20 @@ function resolveFlexible(line: FlexItem[], space: number): void {
  * With `commit` the children are sized and positioned (inner size must then be final).
  */
 export function flexLayout(host: UILayoutHost, innerW: number, innerH: number, fixedW: boolean, fixedH: boolean, commit: boolean): Size {
-  const p = host.layout.values;
-  const dir = p.direction ?? 'column';
+  const dir = host.layout.values.direction ?? 'column';
   if (dir === 'stack') return stackLayout(host, innerW, innerH, fixedW, fixedH, commit);
-  const row = dir === 'row';
+  const itemBase = poolTop;
+  const lineBase = lineTop;
+  try {
+    return flexRun(host, dir === 'row', innerW, innerH, fixedW, fixedH, commit);
+  } finally {
+    releaseItems(itemBase);
+    lineTop = lineBase;
+  }
+}
+
+function flexRun(host: UILayoutHost, row: boolean, innerW: number, innerH: number, fixedW: boolean, fixedH: boolean, commit: boolean): Size {
+  const p = host.layout.values;
   const gap = uiSpace(p.gap);
   const crossGap = p.crossGap !== undefined ? uiSpace(p.crossGap) : gap;
   const alignItems = p.align ?? 'stretch';
@@ -446,12 +645,18 @@ export function flexLayout(host: UILayoutHost, innerW: number, innerH: number, f
   const baseW = fixedW ? innerW : NaN;
   const baseH = fixedH ? innerH : NaN;
 
-  const items: FlexItem[] = [];
-  for (const n of host.children) {
+  const itemBase = poolTop;
+  const kids = host.children;
+  for (let ci = 0; ci < kids.length; ci++) {
+    const n = kids[ci]!;
     if (!n.visible) continue;
     const ip = props(n);
     if ((ip.position ?? 'flow') !== 'flow') continue;
-    const [mt, mr, mb, ml] = uiEdges(ip.margin);
+    const m = edgesInto(ip.margin, E);
+    const mt = m[0]!;
+    const mr = m[1]!;
+    const mb = m[2]!;
+    const ml = m[3]!;
     const mMain = row ? ml + mr : mt + mb;
     const mCross = row ? mt + mb : ml + mr;
     let align: UIAlign = ip.alignSelf && ip.alignSelf !== 'auto' ? ip.alignSelf : alignItems;
@@ -468,15 +673,11 @@ export function flexLayout(host: UILayoutHost, innerW: number, innerH: number, f
 
     const explicitMain = res(row ? ip.width : ip.height, row ? baseW : baseH);
     const basisProp = res(ip.basis, mainFixed ? mainAvail : NaN);
-    const measureMain = () =>
-      row
-        ? measureUINode(n, Infinity, crossRoom, baseW, baseH, NaN, crossFix).w
-        : measureUINode(n, crossRoom, Infinity, baseW, baseH, crossFix, NaN).h;
     let basis: number;
     let contentMain = NaN;
     if (!isNaN(basisProp)) basis = basisProp;
     else {
-      basis = measureMain();
+      basis = measureMain(n, row, crossRoom, baseW, baseH, crossFix);
       if (isNaN(explicitMain)) contentMain = basis;
     }
     const minProp = row ? ip.minWidth : ip.minHeight;
@@ -487,101 +688,113 @@ export function flexLayout(host: UILayoutHost, innerW: number, innerH: number, f
     else if (row) min = isNaN(explicitMain) ? minContentWidthOf(n, baseW) : Math.min(minContentWidthOf(n, baseW), explicitMain);
     else if (!isNaN(explicitMain)) min = explicitMain;
     else if (isUIHost(n)) min = measureUINode(n, crossRoom, 0, baseW, baseH, crossFix, NaN).h;
-    else min = isNaN(contentMain) ? measureMain() : contentMain;
-    items.push({
-      n,
-      mMain,
-      mCross,
-      mMainStart: row ? ml : mt,
-      mCrossStart: row ? mt : ml,
-      basis,
-      min,
-      max,
-      hypo: clamp(basis, min, Math.max(min, max)),
-      main: 0,
-      cross: 0,
-      crossFix,
-      minCross,
-      maxCross,
-      stretch,
-      align,
-      grow: ip.grow ?? 0,
-      shrink: ip.shrink ?? 1,
-      frozen: false,
-      viol: 0,
-    });
+    else min = isNaN(contentMain) ? measureMain(n, row, crossRoom, baseW, baseH, crossFix) : contentMain;
+    const it = takeItem(n);
+    it.mMain = mMain;
+    it.mCross = mCross;
+    it.mMainStart = row ? ml : mt;
+    it.mCrossStart = row ? mt : ml;
+    it.basis = basis;
+    it.min = min;
+    it.max = max;
+    it.hypo = clamp(basis, min, Math.max(min, max));
+    it.main = 0;
+    it.cross = 0;
+    it.crossFix = crossFix;
+    it.minCross = minCross;
+    it.maxCross = maxCross;
+    it.stretch = stretch;
+    it.align = align;
+    it.grow = ip.grow ?? 0;
+    it.shrink = ip.shrink ?? 1;
+    it.frozen = false;
+    it.viol = 0;
   }
+  const itemEnd = poolTop;
 
-  const lines: FlexItem[][] = [];
+  const lineBase = lineTop;
   if (wrap && isFinite(mainAvail)) {
-    let cur: FlexItem[] = [];
+    let start = itemBase;
     let used = 0;
-    for (const it of items) {
+    for (let i = itemBase; i < itemEnd; i++) {
+      const it = pool[i]!;
       const outer = it.hypo + it.mMain;
-      if (cur.length > 0 && used + gap + outer > mainAvail + 0.01) {
-        lines.push(cur);
-        cur = [];
+      if (i > start && used + gap + outer > mainAvail + 0.01) {
+        pushLine(start, i);
+        start = i;
         used = 0;
       }
-      used += (cur.length ? gap : 0) + outer;
-      cur.push(it);
+      used += (i > start ? gap : 0) + outer;
     }
-    if (cur.length) lines.push(cur);
-  } else lines.push(items);
+    if (itemEnd > start) pushLine(start, itemEnd);
+  } else pushLine(itemBase, itemEnd);
+  const lineEnd = lineTop;
+  const lineCount = (lineEnd - lineBase) / 3;
 
-  for (const line of lines) {
-    const gaps = gap * Math.max(0, line.length - 1);
+  for (let L = lineBase; L < lineEnd; L += 3) {
+    const a = lineBuf[L]!;
+    const b = lineBuf[L + 1]!;
+    const gaps = gap * Math.max(0, b - a - 1);
     let sum = gaps;
-    for (const it of line) sum += it.hypo + it.mMain;
+    for (let i = a; i < b; i++) sum += pool[i]!.hypo + pool[i]!.mMain;
     let lineMain = mainFixed ? mainAvail : Math.min(sum, mainAvail);
     if (!isFinite(lineMain)) lineMain = sum;
-    resolveFlexible(line, lineMain - gaps);
+    resolveFlexible(a, b, lineMain - gaps);
   }
 
   const crossRoomAll = Math.max(0, crossAvail);
-  const lineCross: number[] = [];
-  for (const line of lines) {
+  for (let L = lineBase; L < lineEnd; L += 3) {
+    const a = lineBuf[L]!;
+    const b = lineBuf[L + 1]!;
     let lc = 0;
-    for (const it of line) {
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
       if (!isNaN(it.crossFix)) it.cross = it.crossFix;
       else {
         const room = Math.max(0, crossRoomAll - it.mCross);
         const s = row
-          ? measureUINode(it.n, it.main, room, baseW, baseH, it.main, NaN)
-          : measureUINode(it.n, room, it.main, baseW, baseH, NaN, it.main);
+          ? measureUINode(it.n!, it.main, room, baseW, baseH, it.main, NaN)
+          : measureUINode(it.n!, room, it.main, baseW, baseH, NaN, it.main);
         it.cross = row ? s.h : s.w;
       }
       lc = Math.max(lc, it.cross + it.mCross);
     }
-    if (lines.length === 1 && crossFixed) lc = crossAvail;
-    for (const it of line) {
+    if (lineCount === 1 && crossFixed) lc = crossAvail;
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
       if (it.stretch && isNaN(it.crossFix)) it.cross = clamp(lc - it.mCross, it.minCross, Math.max(it.minCross, it.maxCross));
     }
-    lineCross.push(lc);
+    lineBuf[L + 2] = lc;
   }
 
   let contentMain = 0;
   let contentCross = 0;
-  lines.forEach((line, i) => {
-    let used = gap * Math.max(0, line.length - 1);
-    for (const it of line) used += it.main + it.mMain;
+  for (let L = lineBase; L < lineEnd; L += 3) {
+    const a = lineBuf[L]!;
+    const b = lineBuf[L + 1]!;
+    let used = gap * Math.max(0, b - a - 1);
+    for (let i = a; i < b; i++) used += pool[i]!.main + pool[i]!.mMain;
     contentMain = Math.max(contentMain, used);
-    contentCross += lineCross[i]! + (i > 0 ? crossGap : 0);
-  });
+    contentCross += lineBuf[L + 2]! + (L > lineBase ? crossGap : 0);
+  }
   const size = row ? { w: contentMain, h: contentCross } : { w: contentCross, h: contentMain };
   if (!commit) return size;
 
-  const [pt, , , pl] = padOf(host);
+  const pd = padInto(host, E);
+  const pt = pd[0]!;
+  const pl = pd[3]!;
   const mainStart = row ? pl : pt;
   const crossStart = row ? pt : pl;
   const justify = p.justify ?? 'start';
   let crossPos = 0;
-  lines.forEach((line, li) => {
-    const lc = lineCross[li]!;
-    let used = gap * Math.max(0, line.length - 1);
-    for (const it of line) used += it.main + it.mMain;
+  for (let L = lineBase; L < lineEnd; L += 3) {
+    const a = lineBuf[L]!;
+    const b = lineBuf[L + 1]!;
+    const lc = lineBuf[L + 2]!;
+    let used = gap * Math.max(0, b - a - 1);
+    for (let i = a; i < b; i++) used += pool[i]!.main + pool[i]!.mMain;
     const free = mainAvail - used;
-    const count = line.length;
+    const count = b - a;
     let lead = 0;
     let between = 0;
     if (justify === 'center') lead = free / 2;
@@ -597,50 +810,77 @@ export function flexLayout(host: UILayoutHost, innerW: number, innerH: number, f
       }
     }
     let pos = lead;
-    for (const it of line) {
+    for (let i = a; i < b; i++) {
+      const it = pool[i]!;
       pos += it.mMainStart;
       const outerCross = it.cross + it.mCross;
       const off = it.align === 'center' ? (lc - outerCross) / 2 : it.align === 'end' ? lc - outerCross : 0;
       const c = crossPos + off + it.mCrossStart;
-      if (row) placeUINode(it.n, mainStart + pos, crossStart + c, it.main, it.cross);
-      else placeUINode(it.n, crossStart + c, mainStart + pos, it.cross, it.main);
+      if (row) placeUINode(it.n!, mainStart + pos, crossStart + c, it.main, it.cross);
+      else placeUINode(it.n!, crossStart + c, mainStart + pos, it.cross, it.main);
       pos += it.main + (it.mMain - it.mMainStart) + gap + between;
     }
     crossPos += lc + crossGap;
-  });
+  }
   return size;
 }
 
 function stackLayout(host: UILayoutHost, innerW: number, innerH: number, fixedW: boolean, fixedH: boolean, commit: boolean): Size {
+  const itemBase = poolTop;
+  try {
+    return stackRun(host, innerW, innerH, fixedW, fixedH, commit);
+  } finally {
+    releaseItems(itemBase);
+  }
+}
+
+function stackRun(host: UILayoutHost, innerW: number, innerH: number, fixedW: boolean, fixedH: boolean, commit: boolean): Size {
   const p = host.layout.values;
   const alignItems = p.align ?? 'center';
   const baseW = fixedW ? innerW : NaN;
   const baseH = fixedH ? innerH : NaN;
   let cw = 0;
   let ch = 0;
-  const items: { n: Node; s: Size; m: [number, number, number, number]; align: UIAlign }[] = [];
-  for (const n of host.children) {
+  const itemBase = poolTop;
+  const kids = host.children;
+  for (let ci = 0; ci < kids.length; ci++) {
+    const n = kids[ci]!;
     if (!n.visible || positionOf(n) !== 'flow') continue;
     const ip = props(n);
-    const m = uiEdges(ip.margin);
+    const m = edgesInto(ip.margin, E);
+    const mt = m[0]!;
+    const mr = m[1]!;
+    const mb = m[2]!;
+    const ml = m[3]!;
     const align = ip.alignSelf && ip.alignSelf !== 'auto' ? ip.alignSelf : alignItems;
     const stretch = align === 'stretch';
-    const roomW = Math.max(0, innerW - m[1] - m[3]);
-    const roomH = Math.max(0, innerH - m[0] - m[2]);
+    const roomW = Math.max(0, innerW - mr - ml);
+    const roomH = Math.max(0, innerH - mt - mb);
     const sw = stretch && fixedW && (isUIHost(n) || n instanceof Text) && isNaN(res(ip.width, baseW)) ? roomW : NaN;
     const sh = stretch && fixedH && isUIHost(n) && isNaN(res(ip.height, baseH)) ? roomH : NaN;
     const s = measureUINode(n, roomW, roomH, baseW, baseH, sw, sh);
-    cw = Math.max(cw, s.w + m[1] + m[3]);
-    ch = Math.max(ch, s.h + m[0] + m[2]);
-    items.push({ n, s, m, align });
+    cw = Math.max(cw, s.w + mr + ml);
+    ch = Math.max(ch, s.h + mt + mb);
+    const it = takeItem(n);
+    it.sw = s.w;
+    it.sh = s.h;
+    it.mt = mt;
+    it.mr = mr;
+    it.mb = mb;
+    it.ml = ml;
+    it.align = align;
   }
   if (commit) {
-    const [pt, , , pl] = padOf(host);
-    for (const it of items) {
-      const freeW = innerW - it.s.w - it.m[1] - it.m[3];
-      const freeH = innerH - it.s.h - it.m[0] - it.m[2];
+    const pd = padInto(host, E);
+    const pt = pd[0]!;
+    const pl = pd[3]!;
+    const itemEnd = poolTop;
+    for (let i = itemBase; i < itemEnd; i++) {
+      const it = pool[i]!;
+      const freeW = innerW - it.sw - it.mr - it.ml;
+      const freeH = innerH - it.sh - it.mt - it.mb;
       const k = it.align === 'center' ? 0.5 : it.align === 'end' ? 1 : 0;
-      placeUINode(it.n, pl + it.m[3] + freeW * k, pt + it.m[0] + freeH * k, it.s.w, it.s.h);
+      placeUINode(it.n!, pl + it.ml + freeW * k, pt + it.mt + freeH * k, it.sw, it.sh);
     }
   }
   return { w: cw, h: ch };
@@ -655,15 +895,28 @@ export function placeUINode(n: Node, x: number, y: number, w: number, h: number)
   n.y = y + n.anchorY * n.height;
 }
 
+/** Text: wrap at `w`, or not at all when its natural width already matches. */
+function fitText(n: Text, w: number): void {
+  const nat = n.measureNatural();
+  const want = Math.abs(w - nat.width) > 0.5 ? Math.max(1, w) : 0;
+  if (n.style.wrapWidth !== want) n.setStyle({ wrapWidth: want });
+}
+
 /** Applies a final size to `n`: containers arrange their children, Text wraps to the width, leaves are resized. */
 export function layoutUINode(n: Node, w: number, h: number): void {
   if (isUIHost(n)) {
     n.width = w;
     n.height = h;
-    const [t, r, b, l] = padOf(n);
+    const pd = padInto(n, E);
+    const t = pd[0]!;
+    const r = pd[1]!;
+    const b = pd[2]!;
+    const l = pd[3]!;
     n.arrangeContent(Math.max(0, w - l - r), Math.max(0, h - t - b));
     n.layoutDirty = false;
-    for (const c of n.children) {
+    const kids = n.children;
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i]!;
       const s = state(c);
       s.visible = c.visible;
       if (!isUIHost(c)) {
@@ -674,9 +927,7 @@ export function layoutUINode(n: Node, w: number, h: number): void {
     }
     n.onLayout();
   } else if (n instanceof Text) {
-    const nat = n.measureNatural();
-    const want = Math.abs(w - nat.width) > 0.5 ? Math.max(1, w) : 0;
-    if (n.style.wrapWidth !== want) n.setStyle({ wrapWidth: want });
+    fitText(n, w);
   } else {
     intrinsic(n);
     n.width = w;
@@ -686,6 +937,8 @@ export function layoutUINode(n: Node, w: number, h: number): void {
   s.w = n.width;
   s.h = n.height;
   s.visible = n.visible;
+  s.lp = passId;
+  if (s.text) s.text.lw = w;
 }
 
 /** Default arrangeContent: flex children, then absolute and manual children. */
@@ -696,7 +949,9 @@ export function flexArrange(host: UILayoutHost, innerW: number, innerH: number):
 
 /** Places the host's absolute children (relative to its full box) and sizes its manual container children. */
 export function arrangeOutOfFlow(host: UILayoutHost): void {
-  for (const n of host.children) {
+  const kids = host.children;
+  for (let i = 0; i < kids.length; i++) {
+    const n = kids[i]!;
     if (!n.visible) continue;
     const pos = positionOf(n);
     if (pos === 'absolute') placeAbsolute(n, host.width, host.height);
@@ -729,36 +984,101 @@ function placeAbsolute(n: Node, W: number, H: number): void {
 
 // ---------------------------------------------------------------- roots
 
-const rootParentSize = new WeakMap<Node, [number, number]>();
-
-function parentSize(root: Node): [number, number] {
-  const p = root.parent;
-  return [p && p.width > 0 ? p.width : NaN, p && p.height > 0 ? p.height : NaN];
+/**
+ * What a layout root checks every frame, flattened in tree order when it is laid out: every child of every
+ * laid-out container (visibility), their uiSync() hooks, containers' dirty flags and leaf sizes. A frame without
+ * changes is one pass over these arrays instead of a recursive walk with map lookups per node. Structural changes
+ * (add/remove, layout props, Label text) mark the root dirty, so the list is rebuilt with the next layout.
+ */
+interface RootWatch {
+  /** Pass of the root layout that built the list. */
+  pass: number;
+  /** Parent size the root was laid out against. */
+  pw: number;
+  ph: number;
+  /** A watched node was never laid out (a container skipped it): re-layout, like a node added later. */
+  stale: boolean;
+  count: number;
+  nodes: Node[];
+  st: ItemState[];
+  flags: number[];
 }
 
-function subtreeChanged(host: Node): boolean {
-  for (const n of host.children) {
-    const s = states.get(n);
-    if (!s || n.visible !== s.visible) return true;
-    if (!n.visible) continue;
-    const sync = (n as { uiSync?: () => boolean }).uiSync;
-    if (typeof sync === 'function' && sync.call(n)) return true;
-    if (isUIHost(n)) {
-      if (n.layoutDirty || subtreeChanged(n)) return true;
-    } else if (positionOf(n) !== 'manual' && (n.width !== s.w || n.height !== s.h)) return true;
+const WATCH_SYNC = 1;
+const WATCH_HOST = 2;
+const WATCH_SIZE = 4;
+
+function parentW(root: Node): number {
+  const p = root.parent;
+  return p && p.width > 0 ? p.width : NaN;
+}
+
+function parentH(root: Node): number {
+  const p = root.parent;
+  return p && p.height > 0 ? p.height : NaN;
+}
+
+function buildWatch(root: Node, pw: number, ph: number): void {
+  const rs = state(root);
+  const w = (rs.watch ??= { pass: 0, pw: NaN, ph: NaN, stale: false, count: 0, nodes: [], st: [], flags: [] });
+  w.pass = rs.lp;
+  w.pw = pw;
+  w.ph = ph;
+  w.stale = false;
+  w.count = 0;
+  collectWatch(root, w);
+  if (w.nodes.length > w.count) {
+    w.nodes.length = w.count;
+    w.st.length = w.count;
+    w.flags.length = w.count;
   }
-  return false;
+}
+
+function collectWatch(host: Node, w: RootWatch): void {
+  const kids = host.children;
+  for (let i = 0; i < kids.length; i++) {
+    const c = kids[i]!;
+    let s = states.get(c);
+    if (!s) {
+      w.stale = true;
+      s = state(c);
+    }
+    const isHost = isUIHost(c);
+    let f = typeof (c as { uiSync?: unknown }).uiSync === 'function' ? WATCH_SYNC : 0;
+    if (isHost) f |= WATCH_HOST;
+    else if (positionOf(c) !== 'manual') f |= WATCH_SIZE;
+    const k = w.count++;
+    w.nodes[k] = c;
+    w.st[k] = s;
+    w.flags[k] = f;
+    if (isHost && s.visible) collectWatch(c, w);
+  }
 }
 
 /** True when a layout root must be re-laid out (dirty flags, parent resize, child size/visibility changes). */
 export function uiLayoutNeeded(root: UILayoutHost): boolean {
   if (root.layoutDirty) return true;
-  const last = rootParentSize.get(root);
-  const [pw, ph] = parentSize(root);
-  if (!last || !same(last[0], pw) || !same(last[1], ph)) return true;
+  const rs = states.get(root);
+  const w = rs?.watch;
+  if (!w || w.stale || rs!.lp !== w.pass) return true;
+  if (!same(w.pw, parentW(root)) || !same(w.ph, parentH(root))) return true;
   const sync = (root as { uiSync?: () => boolean }).uiSync;
   if (typeof sync === 'function' && sync.call(root)) return true;
-  return subtreeChanged(root);
+  const nodes = w.nodes;
+  const st = w.st;
+  const flags = w.flags;
+  for (let i = 0; i < w.count; i++) {
+    const n = nodes[i]!;
+    const s = st[i]!;
+    if (n.visible !== s.visible) return true;
+    if (!s.visible) continue;
+    const f = flags[i]!;
+    if (f & WATCH_SYNC && (n as unknown as { uiSync(): boolean }).uiSync()) return true;
+    if (f & WATCH_HOST) {
+      if ((n as UILayoutHost).layoutDirty) return true;
+    } else if (f & WATCH_SIZE && (n.width !== s.w || n.height !== s.h)) return true;
+  }
+  return false;
 }
 
 /**
@@ -766,7 +1086,8 @@ export function uiLayoutNeeded(root: UILayoutHost): boolean {
  * parent), or its content. Absolute roots are also positioned inside the parent; others keep their x/y.
  */
 export function layoutUIRoot(root: UILayoutHost): void {
-  const [pw, ph] = parentSize(root);
+  const pw = parentW(root);
+  const ph = parentH(root);
   beginPass();
   try {
     if (positionOf(root) === 'absolute') placeAbsolute(root, pw, ph);
@@ -774,10 +1095,41 @@ export function layoutUIRoot(root: UILayoutHost): void {
       const s = measureUINode(root, isNaN(pw) ? Infinity : pw, isNaN(ph) ? Infinity : ph, pw, ph);
       layoutUINode(root, s.w, s.h);
     }
+    buildWatch(root, pw, ph);
   } finally {
     endPass();
   }
-  rootParentSize.set(root, [pw, ph]);
+}
+
+/**
+ * @internal Called by Label after its text changed. True when the new text reads exactly like the old one wherever
+ * the last layout pass of its root measured it (natural size, wrapped heights, min-content width), so every
+ * measurement and position stays the same: the text is re-wrapped in place and nothing else lays out. False: mark
+ * the layout dirty as usual.
+ */
+export function uiTextRelayoutInPlace(n: Text): boolean {
+  if (passDepth > 0) return false;
+  const s = states.get(n);
+  const t = s?.text;
+  if (!s || !t || s.lp === 0 || t.pass !== s.lp || !isUIHost(n.parent)) return false;
+  let root: Node = n.parent;
+  while (isUIHost(root.parent)) root = root.parent;
+  const rs = states.get(root);
+  if (!rs || rs.lp !== s.lp || !rs.watch || rs.watch.pass !== s.lp) return false;
+  if (!isNaN(t.natW)) {
+    const nat = n.measureNatural();
+    if (nat.width !== t.natW || nat.height !== t.natH) return false;
+  }
+  const ws = t.wraps;
+  for (let i = 0; i < t.wn; i++) if (n.measureWrapped(ws[i * 2]!).height !== ws[i * 2 + 1]) return false;
+  if (!isNaN(t.mcw) && n.minContentWidth() !== t.mcw) return false;
+  fitText(n, t.lw);
+  return n.width === s.w && n.height === s.h;
+}
+
+function flushVisit(n: Node): void {
+  if (isUIHost(n) && !isUIHost(n.parent) && uiLayoutNeeded(n)) layoutUIRoot(n);
+  for (const c of n.children.slice()) flushVisit(c);
 }
 
 /**
@@ -787,9 +1139,5 @@ export function layoutUIRoot(root: UILayoutHost): void {
 export function flushUILayout(node: Node): void {
   let top: Node = node;
   while (isUIHost(top) && isUIHost(top.parent)) top = top.parent;
-  const visit = (n: Node) => {
-    if (isUIHost(n) && !isUIHost(n.parent) && uiLayoutNeeded(n)) layoutUIRoot(n);
-    for (const c of n.children.slice()) visit(c);
-  };
-  visit(top);
+  flushVisit(top);
 }

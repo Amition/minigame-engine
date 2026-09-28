@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { asciiRows, parseAsciiGrid, TileMap, World, type TileLegend } from '@engine';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { asciiRows, parseAsciiGrid, TileMap, World, type Surface, type TileLegend } from '@engine';
 import { createTestGame, type TestGame } from '@engine/testing';
 
 let t: TestGame | null = null;
@@ -124,6 +124,34 @@ describe('TileMap', () => {
     await t.step(1);
     expect(map.bakedChunks).toBe(9);
     expect(map.describe().chunks).toBe('4/4');
+  });
+
+  it('releases chunk canvases (1x1) on releaseChunks and destroy, re-baking visible chunks on demand', async () => {
+    t = await createTestGame();
+    const made: Surface[] = [];
+    const create = t.platform.createCanvas.bind(t.platform);
+    vi.spyOn(t.platform, 'createCanvas').mockImplementation((w, h) => {
+      const s = create(w, h);
+      made.push(s);
+      return s;
+    });
+    const rows = Array.from({ length: 16 }, () => '.'.repeat(16));
+    const map = TileMap.fromAscii(rows, LEGEND, 32, { chunkTiles: 8 });
+    const world = t.game.sceneLayer.add(new World());
+    world.add(map);
+    world.camera.lookAt(256, 256);
+    await t.step(1);
+    const baked = made.splice(0);
+    expect(baked).toHaveLength(4);
+    expect(baked.every((s) => s.width > 256)).toBe(true);
+    map.releaseChunks();
+    expect(baked.every((s) => s.width === 1 && s.height === 1)).toBe(true);
+    await t.step(1);
+    expect(map.bakedChunks).toBe(8);
+    const rebaked = made.splice(0);
+    expect(rebaked).toHaveLength(4);
+    map.destroy();
+    expect(rebaked.every((s) => s.width === 1 && s.height === 1)).toBe(true);
   });
 
   it('only draws chunks in view', async () => {

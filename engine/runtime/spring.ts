@@ -1,6 +1,6 @@
 import type { Game } from '../core/game';
 import { Node } from '../scene/node';
-import { getTicker, isTreePaused, resolveGame, type Tickable } from './ticker';
+import { getTicker, ownerPaused, resolveGame, tickAll, type Tickable } from './ticker';
 
 export interface SpringOptions {
   /** Current value (default 0). */
@@ -132,21 +132,7 @@ function driveLate(game: Game, it: Tickable, realtime = false): void {
     const items: Tickable[] = [];
     list = items;
     lateLists.set(game, items);
-    game.addSystem(
-      {
-        update(dt) {
-          const n = items.length;
-          let w = 0;
-          for (let i = 0; i < n; i++) {
-            const t = items[i]!;
-            if (t.tick(dt)) items[w++] = t;
-          }
-          for (let i = n; i < items.length; i++) items[w++] = items[i]!;
-          items.length = w;
-        },
-      },
-      100,
-    );
+    game.addSystem({ update: (dt) => tickAll(items, dt) }, 100);
   }
   list.push(it);
 }
@@ -162,10 +148,12 @@ export interface SpringDriveOptions {
 
 export interface SpringPropOptions extends SpringOptions, SpringDriveOptions {}
 
-/** A Spring that writes its value into `object[key]` every frame. Created by springProp(). */
+/** A Spring that writes its value into `object[key]` every frame it moves. Created by springProp(). */
 export class SpringProp extends Spring implements Tickable {
   readonly owner: Node | null;
   private live = true;
+  /** Last value written into the property (NaN before the first write). */
+  private written = NaN;
 
   constructor(
     readonly object: object,
@@ -197,9 +185,14 @@ export class SpringProp extends Spring implements Tickable {
         this.live = false;
         return false;
       }
-      if (isTreePaused(o)) return true;
+      if (ownerPaused(o)) return true;
     }
-    (this.object as Record<string, unknown>)[this.key] = this.step(dt);
+    if (this.velocity === 0 && this.value === this.target && this.value === this.written) return true;
+    const v = this.step(dt);
+    if (v !== this.written) {
+      (this.object as Record<string, unknown>)[this.key] = v;
+      this.written = v;
+    }
     return true;
   }
 }
@@ -299,7 +292,7 @@ abstract class NodeSpringFx implements SpringEffect, Tickable {
       this.end();
       return false;
     }
-    if (isTreePaused(this.node)) return true;
+    if (ownerPaused(this.node)) return true;
     this.adopt();
     this.spring.step(dt);
     if (this.spring.atRest) {

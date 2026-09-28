@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { BuildOptions } from 'esbuild';
+import type { BuildOptions, Plugin } from 'esbuild';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -23,6 +23,8 @@ export interface AppMeta {
   ads?: Partial<Record<MiniGameTarget, Record<string, string>>>;
   /** Passive share (menu) content on mini-games. */
   share?: { title?: string; imageUrl?: string; query?: string };
+  /** Mini-games: setInnerAudioOption at startup, e.g. { "obeyMuteSwitch": false } to play on muted iPhones. */
+  innerAudioOption?: { mixWithOther?: boolean; obeyMuteSwitch?: boolean; speakerOn?: boolean };
 }
 
 export function readAppMeta(appDir: string): AppMeta {
@@ -55,7 +57,10 @@ export function entrySource(target: BundleTarget, appDir: string, meta: AppMeta,
     return [`import app from ${main};`, `import { bootWeb } from ${boot};`, `void bootWeb(app, ${JSON.stringify(opts)});`].join('\n');
   }
   const fn = PLATFORM_FACTORY[target];
-  const opts = meta.share ? { share: meta.share } : {};
+  const opts = {
+    ...(meta.share ? { share: meta.share } : {}),
+    ...(meta.innerAudioOption ? { innerAudioOption: meta.innerAudioOption } : {}),
+  };
   return [
     `import app from ${main};`,
     `import { runApp } from '@engine';`,
@@ -64,12 +69,16 @@ export function entrySource(target: BundleTarget, appDir: string, meta: AppMeta,
   ].join('\n');
 }
 
-/** esbuild options for one target: single IIFE game.js, ES2017, tsconfig paths ('@engine'), sourcemap in dev. */
+/**
+ * esbuild options for one target: single IIFE game.js, ES2017, tsconfig paths ('@engine'), sourcemap in dev.
+ * `process.env.NODE_ENV` is 'production' unless dev: code behind an inline `process.env.NODE_ENV !== 'production'`
+ * test (synth fallback, devScenes, dev handles) is dropped from release bundles.
+ */
 export function esbuildOptions(
   target: BundleTarget,
   appDir: string,
   meta: AppMeta,
-  o: { dev: boolean; minify: boolean; outfile: string },
+  o: { dev: boolean; minify: boolean; outfile: string; plugins?: Plugin[] },
 ): BuildOptions {
   return {
     stdin: {
@@ -91,6 +100,7 @@ export function esbuildOptions(
     legalComments: 'none',
     logLevel: 'silent',
     define: { 'process.env.NODE_ENV': JSON.stringify(o.dev ? 'development' : 'production') },
+    ...(o.plugins?.length ? { plugins: o.plugins } : {}),
   };
 }
 

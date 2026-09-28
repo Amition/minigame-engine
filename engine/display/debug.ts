@@ -235,7 +235,7 @@ class DebugDraw {
   }
 }
 
-export const debugDraw = new DebugDraw();
+export const debugDraw = /* @__PURE__ */ new DebugDraw();
 
 function pt(m: Mat2D | null, x: number, y: number, out: Vec2): Vec2 {
   if (m) return m.apply(x, y, out);

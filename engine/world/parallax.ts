@@ -74,12 +74,7 @@ export class ParallaxLayer extends Node {
     const ky0 = rh > 0 ? Math.floor(vis.y / rh) - 1 : 0;
     const ky1 = rh > 0 ? Math.floor((vis.y + vis.h) / rh) + 1 : 0;
     for (let ky = ky0; ky <= ky1; ky++) {
-      for (let kx = kx0; kx <= kx1; kx++) {
-        ctx.save();
-        ctx.translate(kx * rw, ky * rh);
-        super.renderChildren(ctx);
-        ctx.restore();
-      }
+      for (let kx = kx0; kx <= kx1; kx++) this.renderChildrenOffset(ctx, kx * rw, ky * rh);
     }
   }
 

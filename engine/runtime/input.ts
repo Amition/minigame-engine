@@ -145,23 +145,45 @@ const PAD_STICKS: Record<string, readonly [number, 1 | -1]> = {
 
 const isPadCode = (code: string) => code.startsWith('Pad');
 
-function padValue(pads: readonly PlatformGamepad[], code: string, pad: number | undefined, deadZone: number): number {
-  if (!isPadCode(code)) return 0;
+/** A binding code resolved once: button index, or stick axis + sign; `button` -1 and `axis` -1 = not a pad control. */
+interface PadControl {
+  button: number;
+  axis: number;
+  sign: number;
+}
+
+const NO_PAD: PadControl = { button: -1, axis: -1, sign: 0 };
+const padControls = new Map<string, PadControl>();
+
+function padControl(code: string): PadControl {
+  let c = padControls.get(code);
+  if (c) return c;
   const stick = PAD_STICKS[code];
-  const button = stick ? -1 : INPUT_PAD_BUTTONS.indexOf(code.slice(3) as InputPadButton);
-  if (!stick && button < 0) return 0;
+  if (!isPadCode(code)) c = NO_PAD;
+  else if (stick) c = { button: -1, axis: stick[0], sign: stick[1] };
+  else c = { button: INPUT_PAD_BUTTONS.indexOf(code.slice(3) as InputPadButton), axis: -1, sign: 0 };
+  if (padControls.size < 256) padControls.set(code, c);
+  return c;
+}
+
+function padValue(pads: readonly PlatformGamepad[], code: string, pad: number | undefined, deadZone: number): number {
+  const c = padControl(code);
+  if (c.axis < 0 && c.button < 0) return 0;
   let best = 0;
-  for (const g of pads) {
+  for (let i = 0; i < pads.length; i++) {
+    const g = pads[i]!;
     if (pad !== undefined && g.index !== pad) continue;
     let v: number;
-    if (stick) {
-      const raw = (g.axes[stick[0]] ?? 0) * stick[1];
+    if (c.axis >= 0) {
+      const raw = (g.axes[c.axis] ?? 0) * c.sign;
       v = raw <= deadZone ? 0 : (raw - deadZone) / (1 - deadZone);
-    } else v = g.buttons[button] ?? 0;
+    } else v = g.buttons[c.button] ?? 0;
     if (v > best) best = v;
   }
   return clamp01(best);
 }
+
+const NO_PADS: readonly PlatformGamepad[] = Object.freeze([]);
 
 /**
  * Gamepads of one game (web Gamepad API; other platforms report none). Polled once per frame. Codes are
@@ -173,8 +195,8 @@ export class GamepadInput {
   readonly supported: boolean;
   /** Stick deflection below this reads as 0 (default 0.2). */
   deadZone = 0.2;
-  private cur: PlatformGamepad[] = [];
-  private prev: PlatformGamepad[] = [];
+  private cur: readonly PlatformGamepad[] = NO_PADS;
+  private prev: readonly PlatformGamepad[] = NO_PADS;
 
   constructor(private readonly platform: Platform) {
     this.supported = typeof platform.pollGamepads === 'function';
@@ -206,12 +228,17 @@ export class GamepadInput {
     return !this.isDown(code, pad) && padValue(this.prev, code, pad, this.deadZone) >= 0.5;
   }
 
-  /** Stick vector (-1..1 per axis, y down) with a radial dead zone; the strongest pad when `pad` is omitted. */
-  stick(side: 'left' | 'right' = 'left', pad?: number): Vec2 {
+  /**
+   * Stick vector (-1..1 per axis, y down) with a radial dead zone; the strongest pad when `pad` is omitted.
+   * Pass `out` to reuse an object in per-frame code.
+   */
+  stick(side: 'left' | 'right' = 'left', pad?: number, out: Vec2 = { x: 0, y: 0 }): Vec2 {
     const ax = side === 'left' ? 0 : 2;
-    let out = { x: 0, y: 0 };
+    out.x = 0;
+    out.y = 0;
     let best = 0;
-    for (const g of this.cur) {
+    for (let i = 0; i < this.cur.length; i++) {
+      const g = this.cur[i]!;
       if (pad !== undefined && g.index !== pad) continue;
       const x = g.axes[ax] ?? 0;
       const y = g.axes[ax + 1] ?? 0;
@@ -219,7 +246,8 @@ export class GamepadInput {
       if (len <= this.deadZone || len <= best) continue;
       best = len;
       const k = Math.min(1, (len - this.deadZone) / (1 - this.deadZone)) / len;
-      out = { x: x * k, y: y * k };
+      out.x = x * k;
+      out.y = y * k;
     }
     return out;
   }
@@ -227,14 +255,16 @@ export class GamepadInput {
   /** Takes a new snapshot. Called by the input hub at the start of each frame. */
   poll(): void {
     this.prev = this.cur;
-    let next: PlatformGamepad[] = [];
+    let next: readonly PlatformGamepad[] | undefined;
     try {
-      next = this.platform.pollGamepads?.() ?? [];
+      next = this.platform.pollGamepads?.();
     } catch {
-      next = [];
+      next = undefined;
     }
     // Copies: a host may hand out the same live objects every poll, which would hide edges.
-    this.cur = next.map((g) => ({ index: g.index, id: g.id, standard: g.standard, buttons: [...g.buttons], axes: [...g.axes] }));
+    this.cur = next && next.length > 0
+      ? next.map((g) => ({ index: g.index, id: g.id, standard: g.standard, buttons: [...g.buttons], axes: [...g.axes] }))
+      : NO_PADS;
   }
 }
 
@@ -242,7 +272,8 @@ export class GamepadInput {
 
 class InputHub {
   readonly keyboard: KeyboardInput;
-  readonly samplers = new Set<() => void>();
+  // Copy-on-write: frame() walks the array it started with, so adding / removing a sampler mid-frame is safe.
+  private samplers: readonly (() => void)[] = [];
   private pad: GamepadInput | null = null;
   private readonly offs: (() => void)[] = [];
 
@@ -259,15 +290,23 @@ class InputHub {
     return (this.pad ??= new GamepadInput(this.game.platform));
   }
 
+  addSampler(fn: () => void): () => void {
+    if (!this.samplers.includes(fn)) this.samplers = [...this.samplers, fn];
+    return () => {
+      if (this.samplers.includes(fn)) this.samplers = this.samplers.filter((s) => s !== fn);
+    };
+  }
+
   private frame(): void {
     this.keyboard.nextFrame();
     this.pad?.poll();
-    for (const s of [...this.samplers]) s();
+    const list = this.samplers;
+    for (let i = 0; i < list.length; i++) list[i]!();
   }
 
   private dispose(): void {
     for (const off of this.offs.splice(0)) off();
-    this.samplers.clear();
+    this.samplers = [];
     this.keyboard.removeAllListeners();
     if (hubs.get(this.game) === this) hubs.delete(this.game);
   }
@@ -316,9 +355,11 @@ export interface InputActionsEvents<A extends string = string> {
   released: A;
 }
 
-interface ActionState {
+interface ActionState<A extends string = string> {
+  name: A;
   codes: string[];
-  virtual: InputVirtualSource[];
+  /** Copy-on-write, so sampling needs no snapshot while sources add or remove themselves. */
+  virtual: readonly InputVirtualSource[];
   value: number;
   down: boolean;
   pressed: boolean;
@@ -336,7 +377,9 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
   threshold: number;
   destroyed = false;
   readonly keyboard: KeyboardInput;
-  private readonly states = new Map<A, ActionState>();
+  private readonly states = new Map<A, ActionState<A>>();
+  /** The states in definition order (sampled by index every frame). */
+  private readonly order: ActionState<A>[] = [];
   private readonly hub: InputHub;
   private readonly offSampler: () => void;
 
@@ -355,9 +398,7 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
       s.down = s.codes.some((c) => !isPadCode(c) && this.keyboard.isDown(c));
       s.value = s.down ? 1 : 0;
     }
-    const sample = () => this.sample();
-    this.hub.samplers.add(sample);
-    this.offSampler = () => this.hub.samplers.delete(sample);
+    this.offSampler = this.hub.addSampler(() => this.sample());
   }
 
   /** Held this frame. */
@@ -385,12 +426,17 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
     return Math.max(-1, Math.min(1, this.value(positive) - this.value(negative)));
   }
 
-  /** Movement vector from four actions (y down), clamped to length 1 so diagonals are not faster. */
-  vector(left: A, right: A, up: A, down: A): Vec2 {
+  /**
+   * Movement vector from four actions (y down), clamped to length 1 so diagonals are not faster. Pass `out` to reuse
+   * an object in per-frame code.
+   */
+  vector(left: A, right: A, up: A, down: A, out: Vec2 = { x: 0, y: 0 }): Vec2 {
     const x = this.axis(left, right);
     const y = this.axis(up, down);
     const len = Math.hypot(x, y);
-    return len > 1 ? { x: x / len, y: y / len } : { x, y };
+    out.x = len > 1 ? x / len : x;
+    out.y = len > 1 ? y / len : y;
+    return out;
   }
 
   /** Action names, in definition order. */
@@ -420,7 +466,11 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
   /** Replaces the binding codes of an action (key remapping at runtime). */
   rebind(action: A, codes: readonly string[]): this {
     let s = this.states.get(action);
-    if (!s) this.states.set(action, (s = { codes: [], virtual: [], value: 0, down: false, pressed: false, released: false }));
+    if (!s) {
+      s = { name: action, codes: [], virtual: [], value: 0, down: false, pressed: false, released: false };
+      this.states.set(action, s);
+      this.order.push(s);
+    }
     s.codes = [...new Set(codes)];
     if (s.codes.some(isPadCode)) void this.hub.gamepad;
     return this;
@@ -439,11 +489,11 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
    */
   bindVirtual(action: A, source: InputVirtualSource, owner?: Node): () => void {
     this.rebind(action, this.bindings(action));
-    const list = this.states.get(action)!.virtual;
-    list.push(source);
+    const s = this.states.get(action)!;
+    s.virtual = [...s.virtual, source];
     const off = () => {
-      const i = list.indexOf(source);
-      if (i >= 0) list.splice(i, 1);
+      const i = s.virtual.indexOf(source);
+      if (i >= 0) s.virtual = [...s.virtual.slice(0, i), ...s.virtual.slice(i + 1)];
     };
     return owner ? disposeWith(owner, off) : off;
   }
@@ -511,8 +561,8 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
     this.destroyed = true;
     this.offSampler();
     this.removeAllListeners();
-    for (const s of this.states.values()) {
-      s.virtual.length = 0;
+    for (const s of this.order) {
+      s.virtual = [];
       s.value = 0;
       s.down = s.pressed = s.released = false;
     }
@@ -520,20 +570,26 @@ export class InputActions<A extends string = string> extends Emitter<InputAction
 
   private sample(): void {
     const kb = this.keyboard;
-    for (const [name, s] of this.states) {
+    const order = this.order;
+    for (let i = 0; i < order.length; i++) {
       if (this.destroyed) return;
+      const s = order[i]!;
+      const name = s.name;
       const wasDown = s.down;
       let v = 0;
       let tapped = false;
-      for (const c of s.codes) {
+      const codes = s.codes;
+      for (let j = 0; j < codes.length; j++) {
+        const c = codes[j]!;
         if (isPadCode(c)) v = Math.max(v, this.hub.gamepad.value(c));
         else {
           if (kb.isDown(c)) v = 1;
           if (kb.justPressed(c)) tapped = true;
         }
       }
-      for (const src of s.virtual.slice()) {
-        const r = src();
+      const sources = s.virtual;
+      for (let j = 0; j < sources.length; j++) {
+        const r = sources[j]!();
         v = Math.max(v, r === true ? 1 : r === false ? 0 : clamp01(r));
       }
       if (!this.enabled) {

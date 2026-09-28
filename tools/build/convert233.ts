@@ -5,10 +5,15 @@
 //     `npx babel` (preset-env → ES5) over it, prepends wx_unity.js to game.js (removes GameGlobal.fetch),
 //     copies check-version.js and zips <target>/game into <target>/game.zip
 //   - asks for confirmation on stdin when <target> is not empty, and opens Explorer when done (os.startfile)
+// Babel's ES5 output un-minifies game.js (~2.3x the wx size), so --minify runs esbuild over it again (ES5 target:
+// no newer syntax sneaks in), checks that it parses and re-zips <target>/game.
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { Script } from 'node:vm';
+import * as esbuild from 'esbuild';
+import { formatBytes, zipDir } from './files';
 
 export function converterDir(): string {
   return process.env.MINIHOST_CONVERTER || join(tmpdir(), 'minihost-converter');
@@ -47,15 +52,54 @@ export interface ConvertResult {
   message?: string;
   /** Full converter output (also written to <targetDir>/convert.log). */
   logFile?: string;
+  /** Non-fatal problems (re-minify failed: the converter's game.js is shipped as is). */
+  warnings?: string[];
 }
 
 const outputOf = (r: SpawnSyncReturns<string>) => `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n${r.error.message}\n` : ''}`;
 
+export interface MinifyResult {
+  ok: boolean;
+  before: number;
+  after: number;
+  message?: string;
+}
+
+/**
+ * Minifies a converted (ES5) game.js in place with esbuild and checks that the result parses. Leaves the file
+ * untouched when esbuild fails, the output does not parse, or it would not get smaller.
+ */
+export function minifyConverted(file: string): MinifyResult {
+  const src = readFileSync(file, 'utf8');
+  const before = Buffer.byteLength(src);
+  let code: string;
+  try {
+    code = esbuild.transformSync(src, { loader: 'js', minify: true, target: 'es5', charset: 'utf8', legalComments: 'none' }).code;
+  } catch (e) {
+    return { ok: false, before, after: before, message: `esbuild could not minify ${file}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  try {
+    new Script(code, { filename: 'game.js' });
+  } catch (e) {
+    return { ok: false, before, after: before, message: `minified ${file} does not parse: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  const after = Buffer.byteLength(code);
+  if (after >= before) return { ok: true, before, after: before };
+  writeFileSync(file, code);
+  return { ok: true, before, after };
+}
+
 /**
  * Converts a built wx package dir into <targetDir>/game.zip. Skips (ok: true, skipped) when no converter exists.
  * The converter's output goes to <targetDir>/convert.log; `log` gets one summary line, or the whole log on failure.
+ * `minify`: minify the converted game.js again and re-zip (see minifyConverted).
  */
-export function convert233(wxDir: string, targetDir: string, log: (s: string) => void = console.log): ConvertResult {
+export function convert233(
+  wxDir: string,
+  targetDir: string,
+  log: (s: string) => void = console.log,
+  o: { minify?: boolean } = {},
+): ConvertResult {
   const conv = findConverter();
   if (!conv) return { ok: true, skipped: true, message: `converter not found at ${converterDir()}\n${CONVERTER_HELP}` };
   const py = findPython();
@@ -105,6 +149,17 @@ export function convert233(wxDir: string, targetDir: string, log: (s: string) =>
   const zip = join(targetDir, 'game.zip');
   if (r.status !== 0 || !existsSync(zip)) {
     return finish({ ok: false, message: `converter failed (exit ${r.status ?? r.signal ?? r.error?.message})` });
+  }
+  const gameJs = join(targetDir, 'game', 'game.js');
+  if (o.minify && existsSync(gameJs)) {
+    const m = minifyConverted(gameJs);
+    if (!m.ok) {
+      output += `\n$ esbuild minify game/game.js: FAILED, keeping the converter output\n${m.message}\n`;
+      return finish({ ok: true, zip, zipBytes: statSync(zip).size, warnings: [`${m.message} (shipping it unminified)`] });
+    }
+    output += `\n$ esbuild minify game/game.js: ${formatBytes(m.before)} -> ${formatBytes(m.after)} (parses)\n`;
+    log(`[233] re-minified game.js: ${formatBytes(m.before)} -> ${formatBytes(m.after)}`);
+    return finish({ ok: true, zip, zipBytes: zipDir(join(targetDir, 'game'), zip) });
   }
   return finish({ ok: true, zip, zipBytes: statSync(zip).size });
 }

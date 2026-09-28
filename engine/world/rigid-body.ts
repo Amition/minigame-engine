@@ -1,7 +1,7 @@
 import type { Node } from '../scene/node';
 import type { RigidJoint } from './rigid-joint';
 import { rigidShapeMass, type RigidShape } from './rigid-shapes';
-import type { RigidWorld } from './rigid-world';
+import type { RigidContact, RigidWorld } from './rigid-world';
 
 /** dynamic: moved by forces and contacts; static: never moves; kinematic: moves by its velocity only, pushes dynamics. */
 export type RigidBodyType = 'dynamic' | 'static' | 'kinematic';
@@ -116,6 +116,8 @@ export class RigidBody {
   slot = 0;
   /** How far the body can travel this substep (speculative contact reach, internal). */
   spec = 0;
+  /** Contacts this body is part of, unordered (maintained by the world, internal). */
+  readonly contactEdges: RigidContact[] = [];
   private _shape: RigidShape;
   private _fixedRotation: boolean;
 
@@ -168,7 +170,7 @@ export class RigidBody {
   }
 
   get speed(): number {
-    return Math.hypot(this.vx, this.vy);
+    return Math.sqrt(this.vx * this.vx + this.vy * this.vy);
   }
 
   /** Replaces the shape (e.g. a growing circle), recomputes mass and wakes the body. Shapes are immutable. */
@@ -252,7 +254,8 @@ export class RigidBody {
     if (this.sleeping) {
       this.sleeping = false;
       this.sleepTime = 0;
-      for (const j of this.joints) j.other(this).wake();
+      const joints = this.joints;
+      for (let i = 0; i < joints.length; i++) joints[i]!.other(this).wake();
     }
   }
 

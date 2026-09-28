@@ -1,4 +1,3 @@
-import { darken, lighten } from '../core/color';
 import { clamp, damp } from '../core/math';
 import { roundRectPath } from '../gfx/draw';
 import type { Ctx2D } from '../gfx/types';
@@ -8,6 +7,7 @@ import { UI_MIN_TAP } from './button';
 import { uiEvents } from './events';
 import { Label } from './label';
 import type { Size } from './layout';
+import { UIGradientCache, uiShade } from './paint';
 import { uiColor, type UIColor } from './theme';
 import { UIView, type UINodeProps } from './view';
 
@@ -47,6 +47,7 @@ export class ProgressBar extends UIView {
   private shown: number;
   private labelMode: string | boolean;
   private thickness: number;
+  private readonly fillGradient = new UIGradientCache();
 
   constructor(props: ProgressBarProps = {}) {
     const hasLabel = !!props.label;
@@ -125,10 +126,7 @@ export class ProgressBar extends UIView {
       const fw = Math.max(ih, (w - pad * 2) * k);
       const base = uiColor(this.color);
       pill(ctx, pad, pad, fw, ih);
-      const g = ctx.createLinearGradient(0, pad, 0, pad + ih);
-      g.addColorStop(0, lighten(base, 0.12));
-      g.addColorStop(1, darken(base, 0.04));
-      ctx.fillStyle = g;
+      ctx.fillStyle = this.fillGradient.get2(ctx, 0, pad, 0, pad + ih, uiShade(base, 0.12), uiShade(base, -0.04));
       ctx.fill();
       pill(ctx, pad + ih * 0.25, pad + ih * 0.14, Math.max(0, fw - ih * 0.5), ih * 0.3);
       ctx.fillStyle = 'rgba(255,255,255,0.28)';
@@ -428,6 +426,8 @@ export class Checkbox extends UIView {
       ctx.lineJoin = 'round';
       ctx.strokeStyle = '#ffffff';
       ctx.stroke();
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'miter';
     } else {
       ctx.fillStyle = uiColor('track');
       ctx.fill();
@@ -556,7 +556,7 @@ export class SegmentedControl extends UIView {
     const y = a.y - a.anchorY * a.height;
     const base = uiColor(this.color);
     pill(ctx, x, y + 3, w, a.height);
-    ctx.fillStyle = darken(base, 0.18);
+    ctx.fillStyle = uiShade(base, -0.18);
     ctx.fill();
     pill(ctx, x, y, w, a.height - 1);
     ctx.fillStyle = base;

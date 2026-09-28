@@ -1,9 +1,9 @@
 import { clamp } from '../core/math';
-import { darken, lighten } from '../core/color';
 import type { Ctx2D } from '../gfx/types';
 import { starPath } from './icon';
 import { Label } from './label';
 import type { Size } from './layout';
+import { UIGradientCache, uiShade } from './paint';
 import { uiColor, type UIColor } from './theme';
 import { UIView, type UINodeProps } from './view';
 
@@ -100,6 +100,7 @@ export class StarRating extends UIView {
   color: UIColor;
   private _value: number;
   private t = 99;
+  private readonly starGradients: UIGradientCache[] = [];
 
   constructor(props: StarRatingProps = {}) {
     super(props, 'StarRating');
@@ -156,26 +157,26 @@ export class StarRating extends UIView {
       const cy = (this.height - c.h) / 2 + (lowered ? c.h - s / 2 : s / 2);
       const cx = x + s / 2;
       const r = s / 2;
-      this.drawStar(ctx, cx, cy, r, false, base);
+      this.drawStar(ctx, cx, cy, r, -1, base);
       if (i < this._value) {
         const k = popEase(clamp((this.t - i * 0.22) / 0.32, 0, 1));
-        if (k > 0.01) this.drawStar(ctx, cx, cy, r * k, true, base);
+        if (k > 0.01) this.drawStar(ctx, cx, cy, r * k, i, base);
       }
       x += s + this.gapPx;
     }
+    ctx.lineJoin = 'miter';
   }
 
-  private drawStar(ctx: Ctx2D, cx: number, cy: number, r: number, filled: boolean, base: string): void {
+  /** `filled` = index of the filled star (its gradient cache), -1 for an empty slot. */
+  private drawStar(ctx: Ctx2D, cx: number, cy: number, r: number, filled: number, base: string): void {
     starPath(ctx, cx, cy + r * 0.06, r, r * 0.5);
     ctx.lineJoin = 'round';
-    if (filled) {
-      const g = ctx.createLinearGradient(cx, cy - r, cx, cy + r);
-      g.addColorStop(0, lighten(base, 0.18));
-      g.addColorStop(1, darken(base, 0.06));
-      ctx.fillStyle = g;
+    if (filled >= 0) {
+      const cache = (this.starGradients[filled] ??= new UIGradientCache());
+      ctx.fillStyle = cache.get2(ctx, cx, cy - r, cx, cy + r, uiShade(base, 0.18), uiShade(base, -0.06));
       ctx.fill();
       ctx.lineWidth = Math.max(2, r * 0.12);
-      ctx.strokeStyle = darken(base, 0.25);
+      ctx.strokeStyle = uiShade(base, -0.25);
       ctx.stroke();
       ctx.beginPath();
       ctx.ellipse(cx - r * 0.2, cy - r * 0.22, r * 0.2, r * 0.11, -0.6, 0, Math.PI * 2);

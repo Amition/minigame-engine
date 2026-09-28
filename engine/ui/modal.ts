@@ -4,6 +4,7 @@ import { animateUI } from './anim';
 import { Button, IconButton, type ButtonProps } from './button';
 import { uiEvents } from './events';
 import { Label } from './label';
+import { bindUIOwner, currentUIOwner } from './owner';
 import { Panel, UIView, type UIViewProps } from './view';
 
 export interface ModalProps extends UIViewProps {
@@ -18,6 +19,13 @@ export interface ModalProps extends UIViewProps {
   variant?: 'surface' | 'raised' | 'glass';
   /** Called once after the close animation with the close result (button action, 'close', 'backdrop' or null). */
   onClose?: (result: string | null) => void;
+  /**
+   * Node the modal belongs to. When it is destroyed, or when a scene owner is left (go / restart / pop), the modal
+   * is removed at once without animation: `closed` never resolves and onClose is not called, so code waiting on it
+   * in the old scene stays asleep. Default: the topmost scene when the modal opens in the game overlay (the default
+   * parent). `null`: app-level dialog that survives scene changes.
+   */
+  owner?: Node | null;
 }
 
 /** The dimmed full-screen layer behind a modal; swallows taps. */
@@ -29,6 +37,8 @@ export class UIBackdrop extends UIView {
 }
 
 let openModals = 0;
+
+const same = (a: number, b: number) => a === b || (a !== a && b !== b);
 
 /**
  * Modal window: backdrop + centered panel in `game.overlay`, kept inside the safe area, with open/close
@@ -49,7 +59,11 @@ export class Modal extends UIView {
   closing = false;
   result: string | null = null;
   private resolve: (r: string | null) => void = () => undefined;
-  private insetsKey = '';
+  private readonly ownerProp: Node | null | undefined;
+  private boundOwner: Node | null = null;
+  private unbindOwner: (() => void) | null = null;
+  private synced = false;
+  private readonly insets = { top: 0, right: 0, bottom: 0, left: 0 };
 
   constructor(props: ModalProps = {}, children: Node[] = [], kind = 'Modal') {
     const {
@@ -59,6 +73,7 @@ export class Modal extends UIView {
       animation,
       variant,
       onClose,
+      owner,
       id,
       tags,
       zIndex,
@@ -86,6 +101,7 @@ export class Modal extends UIView {
     );
     this.closeOnBackdrop = closeOnBackdrop ?? true;
     this.onClose = onClose ?? null;
+    this.ownerProp = owner;
     this.animation = animation ?? 'pop';
     this.closed = new Promise((r) => (this.resolve = r));
     this.backdrop = super.addAt(new UIBackdrop(), 0);
@@ -162,24 +178,39 @@ export class Modal extends UIView {
     return Game.current;
   }
 
+  /** Node whose lifetime the open modal follows (see ModalProps.owner); null when app-level or not open. */
+  get owner(): Node | null {
+    return this.boundOwner;
+  }
+
   /** Keeps the panel inside the safe area (re-checked every frame). */
   uiSync(): boolean {
     const g = this.game();
     if (!g) return false;
     const i = g.safeInsets;
-    const key = `${i.top},${i.right},${i.bottom},${i.left}`;
-    if (key === this.insetsKey) return false;
-    this.insetsKey = key;
+    const s = this.insets;
+    if (this.synced && same(i.top, s.top) && same(i.right, s.right) && same(i.bottom, s.bottom) && same(i.left, s.left)) {
+      return false;
+    }
+    this.synced = true;
+    s.top = i.top;
+    s.right = i.right;
+    s.bottom = i.bottom;
+    s.left = i.left;
     const m = 32;
     if (this.animation === 'sheet') this.layout.padding = [i.top + m, 0, 0, 0];
     else this.layout.padding = [i.top + m, i.right + m, i.bottom + m, i.left + m];
     return true;
   }
 
-  /** Shows the modal in `parent` (default: the current game's overlay). */
+  /**
+   * Shows the modal in `parent` (default: the current game's overlay). In the game overlay it belongs to the
+   * topmost scene unless ModalProps.owner says otherwise; elsewhere it lives as long as `parent`.
+   */
   open(parent?: Node): this {
     if (this.isOpen) return this;
-    const host = parent ?? this.game()?.overlay;
+    const overlay = this.game()?.overlay;
+    const host = parent ?? overlay;
     if (!host) throw new Error('Modal.open(): no parent and no Game.current');
     this.zIndex = 100 + openModals++;
     host.add(this);
@@ -192,6 +223,11 @@ export class Modal extends UIView {
     } else {
       animateUI(this.panel, { scale: 1, alpha: 1 }, { from: { scale: 0.82, alpha: 0 }, duration: 0.3, ease: 'outBack' });
     }
+    const owner = this.ownerProp !== undefined ? this.ownerProp : host === overlay ? currentUIOwner() : null;
+    if (owner) {
+      this.boundOwner = owner;
+      this.unbindOwner = bindUIOwner(owner, () => this.destroy());
+    }
     return this;
   }
 
@@ -202,6 +238,7 @@ export class Modal extends UIView {
     this.result = result;
     this.interactiveChildren = false;
     const done = () => {
+      if (!this.isOpen) return;
       this.isOpen = false;
       openModals = Math.max(0, openModals - 1);
       this.destroy();
@@ -212,6 +249,17 @@ export class Modal extends UIView {
     animateUI(this.backdrop, { alpha: 0 }, { duration: 0.18 });
     if (this.animation === 'sheet') animateUI(this.panel, { translateY: this.panel.height + 80 }, { duration: 0.22, ease: 'inQuad', onDone: done });
     else animateUI(this.panel, { scale: 0.86, alpha: 0 }, { duration: 0.16, ease: 'inQuad', onDone: done });
+  }
+
+  protected override onDestroy(): void {
+    this.unbindOwner?.();
+    this.unbindOwner = null;
+    this.boundOwner = null;
+    if (this.isOpen) {
+      this.isOpen = false;
+      openModals = Math.max(0, openModals - 1);
+    }
+    super.onDestroy();
   }
 
   override describe() {

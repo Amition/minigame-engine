@@ -4,10 +4,9 @@ import type { Rect } from '../core/math';
 import type { Node } from '../scene/node';
 import {
   aabbCircleOverlap,
-  aabbOverlap,
-  circleOverlap,
   segmentVsCircle,
   segmentVsRect,
+  type GridRayHit,
   type Manifold,
   type RayHit,
 } from './collide';
@@ -126,6 +125,10 @@ export class ArcadeBody {
   /** Called for each sensor overlap. */
   onOverlap: ((other: ArcadeBody, c: ArcadeCollision) => void) | null = null;
   world: PhysicsWorld | null = null;
+  /** @internal Position in a world's `bodies` as of that world's index rebuild with this epoch. */
+  indexEpoch = 0;
+  /** @internal */
+  indexInWorld = -1;
 
   constructor(opts: ArcadeBodyOptions = {}) {
     this.id = opts.id ?? '';
@@ -294,6 +297,8 @@ export interface PhysicsRayOptions {
 }
 
 const EPS = 1e-6;
+/** Shared by all worlds so a body's stamp names exactly one world's rebuild. */
+let indexEpochs = 0;
 
 /**
  * Fixed-timestep arcade physics system. Register it with `world.attach(game, scene)` (or game.addSystem);
@@ -323,12 +328,19 @@ export class PhysicsWorld implements System {
   private acc = 0;
   private index = new Map<ArcadeBody, number>();
   private indexDirty = true;
+  private epoch = 0;
+  /** Broadphase candidates of the body being resolved: cand[0..candLen), longer entries are stale. */
   private cand: ArcadeBody[] = [];
+  private candLen = 0;
   private tmpRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly events = new Emitter<PhysicsEvents>();
   private stepping = false;
   /** Bodies removed during a step (e.g. from onOverlap); spliced out once the step ends. */
   private readonly pending: ArcadeBody[] = [];
+  private restH = NaN;
+  private restGX = NaN;
+  private restGY = NaN;
+  private restV = 20;
 
   constructor(opts: PhysicsWorldOptions = {}) {
     if (typeof opts.gravity === 'number') this.gravityY = opts.gravity;
@@ -481,7 +493,8 @@ export class PhysicsWorld implements System {
 
   /** Moves a body by (dx, dy), stopping at solid tiles (per axis) and the world bounds. */
   moveBody(b: ArcadeBody, dx: number, dy: number, h: number = this.fixedStep): void {
-    const rest = Math.max(20, Math.hypot(this.gravityX, this.gravityY) * h * 2);
+    if (h !== this.restH || this.gravityX !== this.restGX || this.gravityY !== this.restGY) this.updateRest(h);
+    const rest = this.restV;
     if (dx !== 0) {
       let mx = dx;
       if (b.collideTiles) for (const m of this.tilemaps) mx = sweepX(b, m, mx);
@@ -525,123 +538,167 @@ export class PhysicsWorld implements System {
     }
   }
 
+  /** Speeds below `restV` stop instead of bouncing: two steps of gravity, at least 20 (cached per gravity and h). */
+  private updateRest(h: number): void {
+    this.restH = h;
+    this.restGX = this.gravityX;
+    this.restGY = this.gravityY;
+    this.restV = Math.max(20, Math.hypot(this.gravityX, this.gravityY) * h * 2);
+  }
+
   private rebuildIndex(): void {
     if (!this.indexDirty) return;
     this.indexDirty = false;
     this.index.clear();
-    this.bodies.forEach((b, i) => this.index.set(b, i));
+    const epoch = (this.epoch = ++indexEpochs);
+    this.bodies.forEach((b, i) => {
+      this.index.set(b, i);
+      b.indexEpoch = epoch;
+      b.indexInWorld = i;
+    });
+  }
+
+  /** Index of a body as of the last rebuild; the map answers when another world has restamped the body since. */
+  private indexOf(b: ArcadeBody): number | undefined {
+    return b.indexEpoch === this.epoch ? b.indexInWorld : this.index.get(b);
   }
 
   private resolveBodies(h: number): void {
     this.rebuildIndex();
     const bodies = this.bodies;
     const hash = this.hash;
+    const events = this.events;
     hash.clear();
     for (const b of bodies) if (b.enabled) hash.insert(b, b.bounds(this.tmpRect));
     for (let i = 0; i < bodies.length; i++) {
       const a = bodies[i]!;
-      if (!a.enabled || a.world !== this || this.index.get(a) !== i) continue;
+      if (!a.enabled || a.world !== this || this.indexOf(a) !== i) continue;
       const cand = this.cand;
-      cand.length = 0;
-      hash.query(a.bounds(this.tmpRect), cand);
-      for (const b of cand) {
+      this.candLen = hash.queryInto(a.bounds(this.tmpRect), cand);
+      // candLen is re-read like an array length: a step() nested in a callback refills cand and candLen.
+      for (let k = 0; k < this.candLen; k++) {
+        const b = cand[k]!;
         if (a.world !== this) break;
-        const j = this.index.get(b);
+        const j = this.indexOf(b);
         if (j === undefined || j <= i || b.world !== this) continue;
         if ((a.layer & b.mask) === 0 || (b.layer & a.mask) === 0) continue;
         const sensor = a.sensor || b.sensor;
         if (!sensor && a.immovable && b.immovable) continue;
-        const m = manifold(a, b);
-        if (!m) continue;
-        const c: ArcadeCollision = { a, b, nx: m.nx, ny: m.ny, depth: m.depth };
-        const flipped: ArcadeCollision = { a: b, b: a, nx: -m.nx, ny: -m.ny, depth: m.depth };
+        if (!manifold(a, b)) continue;
+        const nx = scratch.nx;
+        const ny = scratch.ny;
+        const depth = scratch.depth;
+        // Payloads only for someone who receives them; `c` is shared by a's callback and the world event.
+        let c: ArcadeCollision | null = null;
         if (sensor) {
-          a.onOverlap?.(b, c);
-          b.onOverlap?.(a, flipped);
-          this.emit('overlap', c);
+          a.onOverlap?.(b, (c = collision(a, b, nx, ny, depth)));
+          b.onOverlap?.(a, collision(b, a, -nx, -ny, depth));
+          if (events.hasListeners('overlap')) this.emit('overlap', c ?? collision(a, b, nx, ny, depth));
           continue;
         }
         const invA = a.immovable ? 0 : 1 / a.mass;
         const invB = b.immovable ? 0 : 1 / b.mass;
         const total = invA + invB;
-        const pa = (m.depth * invA) / total;
-        const pb = (m.depth * invB) / total;
-        if (pa) this.moveBody(a, -m.nx * pa, -m.ny * pa, h);
-        if (pb) this.moveBody(b, m.nx * pb, m.ny * pb, h);
-        const rv = (b.vx - a.vx) * m.nx + (b.vy - a.vy) * m.ny;
+        const pa = (depth * invA) / total;
+        const pb = (depth * invB) / total;
+        if (pa) this.moveBody(a, -nx * pa, -ny * pa, h);
+        if (pb) this.moveBody(b, nx * pb, ny * pb, h);
+        const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
         if (rv < 0) {
           const e = Math.max(a.bounce, b.bounce);
           const j = (-(1 + e) * rv) / total;
-          a.vx -= j * invA * m.nx;
-          a.vy -= j * invA * m.ny;
-          b.vx += j * invB * m.nx;
-          b.vy += j * invB * m.ny;
+          a.vx -= j * invA * nx;
+          a.vy -= j * invA * ny;
+          b.vx += j * invB * nx;
+          b.vy += j * invB * ny;
         }
-        if (m.ny > 0.5) {
+        if (ny > 0.5) {
           a.touching.down = true;
           b.touching.up = true;
-        } else if (m.ny < -0.5) {
+        } else if (ny < -0.5) {
           a.touching.up = true;
           b.touching.down = true;
         }
-        if (m.nx > 0.5) {
+        if (nx > 0.5) {
           a.touching.right = true;
           b.touching.left = true;
-        } else if (m.nx < -0.5) {
+        } else if (nx < -0.5) {
           a.touching.left = true;
           b.touching.right = true;
         }
-        a.onCollide?.(b, c);
-        b.onCollide?.(a, flipped);
-        this.emit('collide', c);
+        a.onCollide?.(b, (c = collision(a, b, nx, ny, depth)));
+        b.onCollide?.(a, collision(b, a, -nx, -ny, depth));
+        if (events.hasListeners('collide')) this.emit('collide', c ?? collision(a, b, nx, ny, depth));
       }
     }
   }
 
   // ---------------------------------------------------------------- queries
 
-  /** Bodies containing a point (mask filters by body layer). */
-  queryPoint(x: number, y: number, mask = -1): ArcadeBody[] {
-    return this.bodies.filter((b) => this.live(b, mask) && b.containsPoint(x, y));
+  /** Bodies containing a point (mask filters by body layer). Queries append to `out` when given. */
+  queryPoint(x: number, y: number, mask = -1, out: ArcadeBody[] = []): ArcadeBody[] {
+    for (const b of this.bodies) if (this.live(b, mask) && b.containsPoint(x, y)) out.push(b);
+    return out;
   }
 
   /** Bodies overlapping a rect. */
-  queryRect(r: Rect, mask = -1): ArcadeBody[] {
+  queryRect(r: Rect, mask = -1, out: ArcadeBody[] = []): ArcadeBody[] {
     const hw = r.w / 2;
     const hh = r.h / 2;
     const cx = r.x + hw;
     const cy = r.y + hh;
-    return this.bodies.filter((b) => {
-      if (!this.live(b, mask)) return false;
-      if (b.shape === 'circle') return aabbCircleOverlap(cx, cy, hw, hh, b.x, b.y, b.radius) !== null;
-      return Math.abs(b.x - cx) <= b.halfWidth + hw && Math.abs(b.y - cy) <= b.halfHeight + hh;
-    });
+    for (const b of this.bodies) {
+      if (!this.live(b, mask)) continue;
+      const hit =
+        b.shape === 'circle'
+          ? aabbCircleOverlap(cx, cy, hw, hh, b.x, b.y, b.radius, scratch) !== null
+          : Math.abs(b.x - cx) <= b.halfWidth + hw && Math.abs(b.y - cy) <= b.halfHeight + hh;
+      if (hit) out.push(b);
+    }
+    return out;
   }
 
   /** Bodies overlapping a circle. */
-  queryCircle(x: number, y: number, r: number, mask = -1): ArcadeBody[] {
-    return this.bodies.filter((b) => {
-      if (!this.live(b, mask)) return false;
+  queryCircle(x: number, y: number, r: number, mask = -1, out: ArcadeBody[] = []): ArcadeBody[] {
+    for (const b of this.bodies) {
+      if (!this.live(b, mask)) continue;
+      let hit: boolean;
       if (b.shape === 'circle') {
         const dx = b.x - x;
         const dy = b.y - y;
         const rr = b.radius + r;
-        return dx * dx + dy * dy <= rr * rr;
+        hit = dx * dx + dy * dy <= rr * rr;
+      } else {
+        const qx = Math.max(b.left, Math.min(x, b.right));
+        const qy = Math.max(b.top, Math.min(y, b.bottom));
+        hit = (qx - x) * (qx - x) + (qy - y) * (qy - y) <= r * r;
       }
-      const qx = Math.max(b.left, Math.min(x, b.right));
-      const qy = Math.max(b.top, Math.min(y, b.bottom));
-      return (qx - x) * (qx - x) + (qy - y) * (qy - y) <= r * r;
-    });
+      if (hit) out.push(b);
+    }
+    return out;
   }
 
   /** Closest hit along a segment among solid tiles and bodies. */
   raycast(x0: number, y0: number, x1: number, y1: number, opts: PhysicsRayOptions = {}): PhysicsRayHit | null {
     const len = Math.hypot(x1 - x0, y1 - y0);
-    let best: PhysicsRayHit | null = null;
+    let found = false;
+    let bestT = 0;
+    let tileHit: GridRayHit | null = null;
+    let tileMap: TileMap | null = null;
+    let body: ArcadeBody | null = null;
+    let bx = 0;
+    let by = 0;
+    let bnx = 0;
+    let bny = 0;
     if (opts.tiles !== false) {
       for (const m of this.tilemaps) {
         const h = m.raycast(x0, y0, x1, y1);
-        if (h && (!best || h.t < best.t)) best = { ...h, distance: h.t * len, body: null, map: m };
+        if (h && (!found || h.t < bestT)) {
+          found = true;
+          bestT = h.t;
+          tileHit = h;
+          tileMap = m;
+        }
       }
     }
     if (opts.bodies !== false) {
@@ -650,12 +707,22 @@ export class PhysicsWorld implements System {
         if (!this.live(b, mask) || b === opts.ignore || (b.sensor && !opts.sensors)) continue;
         const h =
           b.shape === 'circle'
-            ? segmentVsCircle(x0, y0, x1, y1, b.x, b.y, b.radius)
-            : segmentVsRect(x0, y0, x1, y1, b.bounds(this.tmpRect));
-        if (h && (!best || h.t < best.t)) best = { ...h, distance: h.t * len, body: b, map: null };
+            ? segmentVsCircle(x0, y0, x1, y1, b.x, b.y, b.radius, rayScratch)
+            : segmentVsRect(x0, y0, x1, y1, b.bounds(this.tmpRect), rayScratch);
+        if (h && (!found || h.t < bestT)) {
+          found = true;
+          bestT = h.t;
+          body = b;
+          bx = h.x;
+          by = h.y;
+          bnx = h.nx;
+          bny = h.ny;
+        }
       }
     }
-    return best;
+    if (body) return { t: bestT, x: bx, y: by, nx: bnx, ny: bny, distance: bestT * len, body, map: null };
+    if (tileHit) return { ...tileHit, distance: tileHit.t * len, body: null, map: tileMap };
+    return null;
   }
 
   private live(b: ArcadeBody, mask: number): boolean {
@@ -689,22 +756,85 @@ function respond(v: number, dir: number, bounce: number, rest: number): number {
   return bounce > 0 && Math.abs(v) > rest ? -v * bounce : 0;
 }
 
-function manifold(a: ArcadeBody, b: ArcadeBody): Manifold | null {
-  if (a.shape === 'aabb' && b.shape === 'aabb') {
-    return aabbOverlap(a.x, a.y, a.halfWidth, a.halfHeight, b.x, b.y, b.halfWidth, b.halfHeight);
-  }
-  if (a.shape === 'circle' && b.shape === 'circle') return circleOverlap(a.x, a.y, a.radius, b.x, b.y, b.radius);
-  if (a.shape === 'aabb') return aabbCircleOverlap(a.x, a.y, a.halfWidth, a.halfHeight, b.x, b.y, b.radius);
-  const m = aabbCircleOverlap(b.x, b.y, b.halfWidth, b.halfHeight, a.x, a.y, a.radius);
-  if (m) {
-    m.nx = -m.nx;
-    m.ny = -m.ny;
-  }
-  return m;
+/** Scratch results (the step and queries copy what they need before any user callback runs). */
+const scratch: Manifold = { nx: 0, ny: 0, depth: 0 };
+const rayScratch: RayHit = { t: 0, x: 0, y: 0, nx: 0, ny: 0 };
+
+/**
+ * Overlap of two bodies into `scratch` (normal from a to b); false when apart. Same expressions as aabbOverlap,
+ * circleOverlap and aabbCircleOverlap, but taking bodies: passing a dozen doubles to calls the optimizer does not
+ * inline boxes each of them.
+ */
+function manifold(a: ArcadeBody, b: ArcadeBody): boolean {
+  if (a.shape === 'aabb' && b.shape === 'aabb') return boxBox(a, b);
+  if (a.shape === 'circle' && b.shape === 'circle') return circleCircle(a, b);
+  if (a.shape === 'aabb') return boxCircle(a, b);
+  if (!boxCircle(b, a)) return false;
+  scratch.nx = -scratch.nx;
+  scratch.ny = -scratch.ny;
+  return true;
 }
 
-/** Rows (or columns) a span [lo, hi) overlaps, clamped for iteration. */
-function span(lo: number, hi: number, size: number, count: number, outsideSolid: boolean): [number, number] {
+function setScratch(nx: number, ny: number, depth: number): true {
+  scratch.nx = nx;
+  scratch.ny = ny;
+  scratch.depth = depth;
+  return true;
+}
+
+function boxBox(a: ArcadeBody, b: ArcadeBody): boolean {
+  const dx = b.x - a.x;
+  const px = a.halfWidth + b.halfWidth - Math.abs(dx);
+  if (px <= 0) return false;
+  const dy = b.y - a.y;
+  const py = a.halfHeight + b.halfHeight - Math.abs(dy);
+  if (py <= 0) return false;
+  if (px < py) return setScratch(dx < 0 ? -1 : 1, 0, px);
+  return setScratch(0, dy < 0 ? -1 : 1, py);
+}
+
+function circleCircle(a: ArcadeBody, b: ArcadeBody): boolean {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const rr = a.radius + b.radius;
+  const d2 = dx * dx + dy * dy;
+  if (d2 >= rr * rr) return false;
+  const d = Math.sqrt(d2);
+  if (d === 0) return setScratch(0, 1, rr);
+  return setScratch(dx / d, dy / d, rr - d);
+}
+
+function boxCircle(box: ArcadeBody, c: ArcadeBody): boolean {
+  const hw = box.halfWidth;
+  const hh = box.halfHeight;
+  const r = c.radius;
+  const dx = c.x - box.x;
+  const dy = c.y - box.y;
+  const qx = Math.max(-hw, Math.min(hw, dx));
+  const qy = Math.max(-hh, Math.min(hh, dy));
+  if (qx === dx && qy === dy) {
+    const px = hw - Math.abs(dx);
+    const py = hh - Math.abs(dy);
+    if (px < py) return setScratch(dx < 0 ? -1 : 1, 0, px + r);
+    return setScratch(0, dy < 0 ? -1 : 1, py + r);
+  }
+  const ex = dx - qx;
+  const ey = dy - qy;
+  const d2 = ex * ex + ey * ey;
+  if (d2 >= r * r) return false;
+  const d = Math.sqrt(d2);
+  return setScratch(ex / d, ey / d, r - d);
+}
+
+function collision(a: ArcadeBody, b: ArcadeBody, nx: number, ny: number, depth: number): ArcadeCollision {
+  return { a, b, nx, ny, depth };
+}
+
+let spanLo = 0;
+let spanHi = 0;
+
+/** Rows (or columns) a span [lo, hi) overlaps, clamped for iteration, into spanLo..spanHi. */
+function span(lo: number, hi: number, size: number, count: number, outsideSolid: boolean): void {
   let a = Math.floor((lo + EPS) / size);
   let b = Math.ceil((hi - EPS) / size) - 1;
   if (outsideSolid) {
@@ -714,7 +844,8 @@ function span(lo: number, hi: number, size: number, count: number, outsideSolid:
     a = Math.max(a, 0);
     b = Math.min(b, count - 1);
   }
-  return [a, b];
+  spanLo = a;
+  spanHi = b;
 }
 
 /** Allowed x movement of a body's AABB against a tile map (exact sweep over crossed columns). */
@@ -722,7 +853,9 @@ function sweepX(b: ArcadeBody, m: TileMap, dx: number): number {
   const tw = m.tileWidth;
   const th = m.tileHeight;
   const solidOut = m.solidOutside;
-  const [r0, r1] = span(b.y - b.halfHeight - m.y, b.y + b.halfHeight - m.y, th, m.rows, solidOut);
+  span(b.y - b.halfHeight - m.y, b.y + b.halfHeight - m.y, th, m.rows, solidOut);
+  const r0 = spanLo;
+  const r1 = spanHi;
   if (r0 > r1) return dx;
   if (dx > 0) {
     const edge = b.x + b.halfWidth - m.x;
@@ -757,7 +890,9 @@ function sweepY(b: ArcadeBody, m: TileMap, dy: number): number {
   const tw = m.tileWidth;
   const th = m.tileHeight;
   const solidOut = m.solidOutside;
-  const [c0, c1] = span(b.x - b.halfWidth - m.x, b.x + b.halfWidth - m.x, tw, m.cols, solidOut);
+  span(b.x - b.halfWidth - m.x, b.x + b.halfWidth - m.x, tw, m.cols, solidOut);
+  const c0 = spanLo;
+  const c1 = spanHi;
   if (c0 > c1) return dy;
   if (dy > 0) {
     const edge = b.y + b.halfHeight - m.y;

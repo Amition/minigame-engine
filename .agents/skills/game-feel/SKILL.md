@@ -100,6 +100,21 @@ killTweensOf(node); isTweening(node);
 `sineInOut`, `expoOut`...), `delay`, `repeat`, `yoyo`, `realtime`, `owner`, `game`, `onUpdate(p)`, `onComplete`,
 `onKill`. `tw.kill(true)` jumps to the end; `tw.timeScale`, `pause()` / `resume()`.
 
+`sequence()` / `parallel()` groups have an `owner` node: destroying it kills the group (no further items, waits
+or callbacks; `done` never resolves, like `kill()`), and its waits freeze while the owner's subtree is paused (a
+pushed dialog). Default owner: the scene of the first node its tweens animate (that node itself if it is in no
+scene), else the top scene when the group is created. So a group started in a scene dies with it on
+`scenes.go()` and never fires callbacks into the next scene. Destroying the animated node itself does not stop
+the group (`sequence([popOut(n, 0.2, { destroy: true }), () => next()])` works).
+
+```ts
+sequence([1, () => showHint()], { owner: hintIcon });              // stops when hintIcon is destroyed
+sequence([fadeOut(overlay, 0.3), 2, () => save()], { owner: null }); // app-level: survives scene changes
+```
+
+`springProp` writes its property only while the spring moves: at rest it leaves the property alone (external
+writes stick until the next target change, `kick()` or `snap()`).
+
 ```ts
 after(1, () => spawn(), { owner: this });                          // Timer: cancel(), pause(), remaining
 every(0.5, (n) => spawnEnemy(n), { count: 10, owner: this });     // return false to stop

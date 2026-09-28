@@ -1,4 +1,4 @@
-import { clamp } from '../core/math';
+import { clamp, Mat2D } from '../core/math';
 import type { Ctx2D } from '../gfx/types';
 import { Node, type PointerEvt } from '../scene/node';
 import { uiTapSlop } from './button';
@@ -41,15 +41,20 @@ class ScrollContent extends UIView {
 }
 
 const tmpRect = { x: 0, y: 0, w: 0, h: 0 };
+const tmpMat = new Mat2D();
 
 function renderVisibleChildren(content: Node, sv: ScrollView, ctx: Ctx2D): void {
   content.sortChildren();
   const lo = sv.offset - 64;
   const hi = sv.offset + sv.viewport + 64;
-  for (const c of content.children) {
+  const ch = content.children;
+  for (let i = 0; i < ch.length; i++) {
+    const c = ch[i]!;
+    tmpRect.x = 0;
+    tmpRect.y = 0;
     tmpRect.w = c.width;
     tmpRect.h = c.height;
-    const b = c.localMatrix().applyRect(tmpRect);
+    const b = c.localMatrix(tmpMat).applyRect(tmpRect, tmpRect);
     const a = sv.horizontal ? b.x : b.y;
     const len = sv.horizontal ? b.w : b.h;
     if (a + len < lo || a > hi) continue;

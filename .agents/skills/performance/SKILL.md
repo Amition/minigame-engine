@@ -186,23 +186,41 @@ big pop-in scales) can ask for a margin with a plain number: `resolution: autoTe
   `new CacheContainer(w, h)` follows the screen resolution by default.
 - **Bake vector art**: a `Graphics` with gradients / many paths redrawn every frame is slower than
   `new Sprite(g.bake(autoTextureResolution()))`.
-- **Hide, cull, flatten**: `visible = false` skips a whole subtree; `World` culls off-screen children; empty
-  wrapper nodes still cost a save/restore each.
+- **Hide, cull, flatten**: `visible = false` skips a whole subtree; `World` culls off-screen children; each
+  drawn node costs one `setTransform` (plus `globalAlpha` only when it changes); only `clip` / `blend` /
+  `isolate` nodes add a save/restore.
 - **Pools** (`Pool`, `NodePool`) for bullets, fruits, floating texts instead of create/destroy every frame.
+- **Frame rate**: `game.setFrameRate(30)` on menus, pause and result screens (20 for a static title), back to 60
+  for gameplay; saves battery and heat. dt stays real time.
 
 ## Costly canvas operations
 
 - **shadowBlur / shadows**: very slow on CPU canvases and mini-game runtimes, worst when animated or on large
   shapes. Bake shadows into textures (Box / Graphics shadow once, then `bake`) or use `ShadowBlob`.
-- **Text**: changing `text` re-wraps and re-measures (widths are cached per font, but new strings miss the
-  cache). Update labels only when the value changes, avoid `wrapWidth` on text that changes every frame, and
-  avoid many different font sizes (each is a separate cache).
+- **Text**: layout and measurement are memoized per text + style, so repeated `measure*` calls are free, but a
+  new string re-wraps. Update labels only when the value changes (not every frame to an equal-looking string)
+  and avoid many different font sizes. `TextStyle.cache` (default `'auto'`) draws stroked / shadowed labels and
+  labels unchanged for 30 frames from a shared bitmap, and counters directly; force `'none'` for per-frame
+  values, `'bitmap'` for big stroked titles. Bitmaps show as `text:*` in `textureStats()`; `textBitmapStats()`,
+  budget `setTextBitmapBudget(px)` (1.5 M px, LRU). Change styles with `setStyle`, not by mutating the object.
+- **UI relayout**: a label change that keeps its measured size (timers, fixed or grow width) does not relayout
+  the screen; a size change relayouts the root once. Change UI children via add/remove or `markUILayoutDirty`.
 - **Per-frame allocations**: object / array literals, `slice` / `map` / `filter`, closures and template strings
   in `update()` or `draw()` feed the GC and show up as worst-frame spikes. Reuse objects, keep scratch arrays,
-  prebuild debugDraw styles, format numbers only when they change.
-- **save / restore and state changes**: every node render is a save/restore; `clip` (Node `clip`,
-  MaskContainer), non-default `blend` / `globalCompositeOperation` and alpha changes add up. Group by state.
-- **Gradients**: create them once (bake or cache), not in every `draw()`.
+  prebuild debugDraw styles, format numbers only when they change. For per-frame scratch arrays write by
+  index and keep a count: `arr.length = 0` makes V8 drop the backing store (see `SpatialHash.queryInto`).
+  Copy `this.count` into a local before a hot loop. Engine helpers take `out` params (`worldMatrix(out)`,
+  `toLocal(x, y, out)`, `input.vector(..., out)`, `followNode(...).into(space, out)`); colour strings from
+  `toCss` are cached.
+- **Hot numeric code**: doubles passed to or returned from calls V8 does not inline get boxed (allocated); use
+  scratch objects. No `Math.hypot` in hot paths (it allocates in V8 and rounds differently across engines):
+  `Math.sqrt(x * x + y * y)`.
+- **save / restore and state changes**: rendering is flat `setTransform`; save/restore only for `clip`, `blend`
+  or `isolate`, so `draw()` must reset the canvas state it changes (shadows, line dash, lineCap / lineJoin,
+  composite op) or set `isolate: true`. Clips (Node `clip`, MaskContainer), blends and alpha changes add up.
+- **Gradients**: create them once (bake or cache), not in every `draw()`. Widgets: `uiShade` / `uiMix` /
+  `UIGradientCache` instead of `darken` / `lighten` / `createLinearGradient` per frame; pass `drawUIBox` the same
+  props object every frame.
 - **Scaling big images down every frame**: bake at display size instead.
 - **getImageData / putImageData / toDataURL**: synchronous GPU readback, never per frame.
 - **Baking mid-game**: bakes are synchronous; bake at boot or on scene enter, not on the first spawn.
@@ -214,7 +232,10 @@ big pop-in scales) can ask for a margin with a plain number: `resolution: autoTe
 2. Look at the scene with the overlay: `showDebugOverlay(t.game, { bounds: true, hits: true })` in a test
    or shot, or `?debug=1` in the dev server; on a phone watch fps and the worst frame.
 3. Memory: `textureStats({ top: 10 })`; switch fixed resolutions to `'auto'`, pack small textures into an
-   atlas, release scene-specific textures on exit.
+   atlas, release scene-specific textures on exit. Handle `game.on('memorywarning', ...)`: the engine already
+   dropped tint and text-bitmap caches and asks the host for a GC; free what the game can rebuild
+   (`releaseTexture`, `TileMap.releaseChunks`, `CacheContainer.releaseCache`). Music streams and unloads 4 s
+   after it stops; sfx preload at boot.
 4. CPU: cut drawn nodes (cull, cache, bake), particles (`maxParticles`), shadows, per-frame allocations.
 5. Re-run the same bench command; keep the before / after numbers in the commit message.
 

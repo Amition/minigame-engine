@@ -1,8 +1,8 @@
 import type { ShadowStyle } from '../scene/box';
 import { Text, type TextStyle } from '../scene/text';
-import { markUILayoutDirty, uiLayout, type UILayoutStyle } from './layout';
+import { markUILayoutDirty, uiLayout, uiTextRelayoutInPlace, type UILayoutStyle } from './layout';
 import { uiColor, uiFontFamily, uiTheme, uiThemeVersion, type UIColor, type UITextVariant } from './theme';
-import { applyUINodeProps, type UINodeProps } from './view';
+import { applyUINodeProps, UIView, type UINodeProps } from './view';
 
 export interface LabelProps extends UINodeProps {
   /** Typography token (default 'body'). */
@@ -44,9 +44,21 @@ function labelStyle(p: LabelProps): Partial<TextStyle> {
   };
 }
 
+/** Parent is a plain flex container: only its own layout asks this label for sizes. */
+function inFlexView(n: Label): boolean {
+  const p = n.parent;
+  return (
+    p instanceof UIView &&
+    p.measureContent === UIView.prototype.measureContent &&
+    p.minContentWidth === UIView.prototype.minContentWidth &&
+    p.arrangeContent === UIView.prototype.arrangeContent
+  );
+}
+
 /**
  * Themed text: typography variant + color token. Wraps to the width its container gives it (or shrinks with
- * `autoFit`). Setting `text` re-lays out the surrounding UI.
+ * `autoFit`). Setting `text` re-lays out the surrounding UI, unless the new text measures exactly like the old one
+ * (a HUD counter ticking): then it only re-wraps itself.
  */
 export class Label extends Text {
   private lp: LabelProps;
@@ -79,7 +91,7 @@ export class Label extends Text {
   override set text(v: string | number) {
     const before = super.text;
     super.text = v;
-    if (super.text !== before) markUILayoutDirty(this);
+    if (super.text !== before && !(inFlexView(this) && uiTextRelayoutInPlace(this))) markUILayoutDirty(this);
   }
 
   /** Updates label props (variant, color, size...) and re-lays out. */

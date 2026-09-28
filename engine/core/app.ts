@@ -10,6 +10,12 @@ import { Game, type GameConfig } from './game';
 export interface AppDef extends GameConfig {
   /** Scenes registered before boot(). */
   scenes?: Record<string, SceneFactory>;
+  /**
+   * Review / debug scenes (galleries, previews) registered only outside release builds: dev server, tests, shots.
+   * Write it as `devScenes: process.env.NODE_ENV === 'production' ? undefined : { gallery: () => new GalleryScene() }`
+   * so the release bundle drops the scene code too (a plain object literal would keep it).
+   */
+  devScenes?: Record<string, SceneFactory> | undefined;
   /** Opened after boot() unless boot() already opened a scene. */
   start?: string;
   /** Load assets, register extra scenes, set up systems. */
@@ -18,9 +24,10 @@ export interface AppDef extends GameConfig {
 
 export const defineApp = (app: AppDef): AppDef => app;
 
-/** Registers scenes, runs boot(), opens the start scene. Does not start the loop. */
+/** Registers scenes (devScenes too, except in release builds), runs boot(), opens the start scene. Does not start the loop. */
 export async function bootApp(game: Game, app: AppDef): Promise<void> {
   if (app.scenes) game.scenes.registerAll(app.scenes);
+  if (process.env.NODE_ENV !== 'production' && app.devScenes) game.scenes.registerAll(app.devScenes);
   await app.boot?.(game);
   if (!game.scenes.current && app.start) await game.scenes.go(app.start);
 }

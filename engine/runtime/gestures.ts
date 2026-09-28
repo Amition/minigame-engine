@@ -58,19 +58,27 @@ export function draggable(node: Node, opts: DraggableOptions = {}): Draggable {
   let sy = 0;
   const toParent = (e: PointerEvt): Vec2 => (node.parent ? node.parent.toLocal(e.x, e.y) : { x: e.x, y: e.y });
   const info = (e: PointerEvt): DragInfo => ({ node, pointer: e, x: node.x, y: node.y, dx: node.x - sx, dy: node.y - sy });
-  const clampToBounds = (x: number, y: number): Vec2 => {
-    const b = opts.bounds === 'parent' ? (node.parent ? { x: 0, y: 0, w: node.parent.width, h: node.parent.height } : null) : opts.bounds;
-    if (!b) return { x, y };
+  /** Moves the node to (x, y) clamped into the bounds. */
+  const moveClamped = (x: number, y: number): void => {
+    const b = opts.bounds === 'parent' ? null : opts.bounds;
+    const p = opts.bounds === 'parent' ? node.parent : null;
+    if (!b && !p) {
+      node.x = x;
+      node.y = y;
+      return;
+    }
+    const bx = b ? b.x : 0;
+    const by = b ? b.y : 0;
+    const bw = b ? b.w : p!.width;
+    const bh = b ? b.h : p!.height;
     const w = node.width * Math.abs(node.scaleX);
     const h = node.height * Math.abs(node.scaleY);
-    const minX = b.x + node.anchorX * w;
-    const maxX = b.x + b.w - (1 - node.anchorX) * w;
-    const minY = b.y + node.anchorY * h;
-    const maxY = b.y + b.h - (1 - node.anchorY) * h;
-    return {
-      x: maxX < minX ? (minX + maxX) / 2 : Math.min(Math.max(x, minX), maxX),
-      y: maxY < minY ? (minY + maxY) / 2 : Math.min(Math.max(y, minY), maxY),
-    };
+    const minX = bx + node.anchorX * w;
+    const maxX = bx + bw - (1 - node.anchorX) * w;
+    const minY = by + node.anchorY * h;
+    const maxY = by + bh - (1 - node.anchorY) * h;
+    node.x = maxX < minX ? (minX + maxX) / 2 : Math.min(Math.max(x, minX), maxX);
+    node.y = maxY < minY ? (minY + maxY) / 2 : Math.min(Math.max(y, minY), maxY);
   };
   const handle: Draggable = {
     enabled: true,
@@ -102,9 +110,7 @@ export function draggable(node: Node, opts: DraggableOptions = {}): Draggable {
     listen(node, 'pointermove', (e) => {
       if (e.pointerId !== id) return;
       const p = toParent(e);
-      const c = clampToBounds(axis === 'y' ? node.x : p.x + ox, axis === 'x' ? node.y : p.y + oy);
-      node.x = c.x;
-      node.y = c.y;
+      moveClamped(axis === 'y' ? node.x : p.x + ox, axis === 'x' ? node.y : p.y + oy);
       opts.onMove?.(info(e));
     }),
     listen(node, 'pointerup', end),
@@ -399,16 +405,27 @@ export function onAim(zone: Node | Game, handlers: AimHandlers, opts: AimOptions
   let t0 = 0;
   let sx = 0;
   let sy = 0;
-  let samples: { t: number; x: number; y: number }[] = [];
+  // Velocity window (samples of the last ~0.1 s) as parallel arrays from index `first` on: no object per event.
+  const smpT: number[] = [];
+  const smpX: number[] = [];
+  const smpY: number[] = [];
+  let first = 0;
   const blocked = () => (!!owner && isTreePaused(owner)) || (!!opts.enabled && !opts.enabled());
   const toSpace = (e: PointerEvt): Vec2 => (space ? space.toLocal(e.x, e.y) : { x: e.x, y: e.y });
   const info = (e: PointerEvt): AimInfo => {
     const p = toSpace(e);
     const now = game.time.realElapsed;
-    samples.push({ t: now, x: p.x, y: p.y });
-    while (samples.length > 2 && now - samples[1]!.t >= 0.1) samples.shift();
-    const first = samples[0]!;
-    const span = now - first.t;
+    smpT.push(now);
+    smpX.push(p.x);
+    smpY.push(p.y);
+    while (smpT.length - first > 2 && now - smpT[first + 1]! >= 0.1) first++;
+    if (first >= 32) {
+      smpT.splice(0, first);
+      smpX.splice(0, first);
+      smpY.splice(0, first);
+      first = 0;
+    }
+    const span = now - smpT[first]!;
     let dx = p.x - sx;
     let dy = p.y - sy;
     let distance = Math.hypot(dx, dy);
@@ -430,8 +447,8 @@ export function onAim(zone: Node | Game, handlers: AimHandlers, opts: AimOptions
       distance,
       angle: distance > 0 ? Math.atan2(dy, dx) : 0,
       duration: now - t0,
-      vx: span > 1e-6 ? (p.x - first.x) / span : 0,
-      vy: span > 1e-6 ? (p.y - first.y) / span : 0,
+      vx: span > 1e-6 ? (p.x - smpX[first]!) / span : 0,
+      vy: span > 1e-6 ? (p.y - smpY[first]!) / span : 0,
     };
   };
   const cancel = (e: PointerEvt) => {
@@ -447,7 +464,7 @@ export function onAim(zone: Node | Game, handlers: AimHandlers, opts: AimOptions
       const p = toSpace(e);
       sx = p.x;
       sy = p.y;
-      samples = [];
+      smpT.length = smpX.length = smpY.length = first = 0;
       handlers.start?.(info(e));
     }),
     listen(zone, 'pointermove', (e) => {

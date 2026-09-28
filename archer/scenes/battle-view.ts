@@ -1,4 +1,4 @@
-import { ballisticPosition, Node, Text, type Ctx2D, type NodeOptions } from '@engine';
+import { ballisticPosition, Node, Scene, Text, type Ctx2D, type NodeOptions } from '@engine';
 import { drawApple, drawArrow, drawBackdrop, drawExplosion, drawFighter, drawLightning, drawPlatform } from '../art/index';
 import { COLORS } from '../config';
 import { ARROW_GRAVITY } from '../model';
@@ -17,7 +17,14 @@ export class Backdrop extends Node {
   }
 
   override draw(ctx: Ctx2D): void {
-    drawBackdrop(ctx, this.width, this.height, this.time);
+    drawBackdrop(ctx, this.width, this.height, this.time, !this.overGameClear());
+  }
+
+  /** Nothing but the game's clear colour lies under it (a scene fading in still has the old one below). */
+  private overGameClear(): boolean {
+    const scene = this.parent;
+    if (!(scene instanceof Scene) || scene.children[0] !== this) return false;
+    return scene.parent?.children[0] === scene && scene.game.background === COLORS.bg;
   }
 }
 

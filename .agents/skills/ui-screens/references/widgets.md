@@ -77,15 +77,18 @@ resolved at draw time; the bake is cached per texture + colour, see `tintTexture
 ## Modal / Dialog / Toast
 
 `ModalProps` (plus container/box props for the panel): `title`, `closeButton` (true), `closeOnBackdrop` (true),
-`animation` (`pop` | `sheet`), `variant` (`raised` default, `surface`, `glass`), `onClose(result)`.
+`animation` (`pop` | `sheet`), `variant` (`raised` default, `surface`, `glass`), `onClose(result)`,
+`owner` (default: topmost scene when opened in the game overlay; `null` = app-level, survives scene changes).
 Panel defaults: width 100% capped at 640 (900 for sheets), padding xl, gap lg.
-Runtime: `open(parent?)`, `close(result)`, `closed` (Promise), `body`, `isOpen`, `backdrop`, `panel`.
+Runtime: `open(parent?)`, `close(result)`, `closed` (Promise; never resolves when the owner goes away), `body`,
+`isOpen`, `owner`, `backdrop`, `panel`.
 
 `DialogProps` add `message`, `buttons: DialogButton[]` (default one `OK` button with action `ok`), `vertical`.
 `DialogButton` = `ButtonProps` + `text`, `action` (close result; defaults to text), `keepOpen`, `onTap()`.
 Dialog buttons default to `variant: 'primary', size: 'lg'`.
 
-`showToast(text, { icon, duration: 2, variant: 'info', position: 'top' })` queues; `toastHost().clear()` drops them.
+`showToast(text, { icon, duration: 2, variant: 'info', position: 'top', owner })` queues; `toastHost().clear()` drops
+them. Toasts of a scene that is left are dropped too (`owner: null` keeps an app-level toast).
 
 ## JSON spec type names
 

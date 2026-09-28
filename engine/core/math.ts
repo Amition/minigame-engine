@@ -129,6 +129,18 @@ export class Mat2D {
     return this;
   }
 
+  /** this = m * this (this applied first); same result as `m.clone().multiply(this)` without allocating. */
+  premultiply(m: Mat2D): this {
+    const { a, b, c, d, e, f } = this;
+    this.a = m.a * a + m.c * b;
+    this.b = m.b * a + m.d * b;
+    this.c = m.a * c + m.c * d;
+    this.d = m.b * c + m.d * d;
+    this.e = m.a * e + m.c * f + m.e;
+    this.f = m.b * e + m.d * f + m.f;
+    return this;
+  }
+
   translate(x: number, y: number): this {
     this.e += this.a * x + this.c * y;
     this.f += this.b * x + this.d * y;
@@ -175,24 +187,45 @@ export class Mat2D {
     return out;
   }
 
-  /** Axis-aligned bounds of a local rect after transformation. */
-  applyRect(r: Rect): Rect {
-    const p = { x: 0, y: 0 };
+  /** Axis-aligned bounds of a local rect after transformation (into `out` when given; `out` may be `r`). */
+  applyRect(r: Rect, out: Rect = { x: 0, y: 0, w: 0, h: 0 }): Rect {
+    const { a, b, c, d, e, f } = this;
+    const x0 = r.x;
+    const y0 = r.y;
+    const x1 = r.x + r.w;
+    const y1 = r.y + r.h;
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
-    const xs = [r.x, r.x + r.w];
-    const ys = [r.y, r.y + r.h];
-    for (const x of xs) {
-      for (const y of ys) {
-        this.apply(x, y, p);
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-    }
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+    let px = a * x0 + c * y0 + e;
+    let py = b * x0 + d * y0 + f;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+    px = a * x0 + c * y1 + e;
+    py = b * x0 + d * y1 + f;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+    px = a * x1 + c * y0 + e;
+    py = b * x1 + d * y0 + f;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+    px = a * x1 + c * y1 + e;
+    py = b * x1 + d * y1 + f;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+    out.x = minX;
+    out.y = minY;
+    out.w = maxX - minX;
+    out.h = maxY - minY;
+    return out;
   }
 }

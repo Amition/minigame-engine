@@ -1,8 +1,10 @@
 import { setTextureBackingScale } from '../gfx/texture';
+import { clearTintCache } from '../gfx/tint';
 import type { Ctx2D } from '../gfx/types';
-import type { Platform, RawTouchEvent } from '../platform/types';
+import type { MemoryWarningInfo, Platform, RawTouchEvent } from '../platform/types';
 import { Node, type PointerEvt, type PointerPhase } from '../scene/node';
 import { type Scene, SceneManager } from '../scene/scene';
+import { clearTextBitmaps } from '../scene/text-bitmap';
 import type { Color } from './color';
 import { Emitter } from './emitter';
 import { Mat2D, type Insets, type Rect, type Vec2 } from './math';
@@ -29,6 +31,8 @@ export interface GameConfig {
   tapSlop?: number;
   /** Pause updates while the app is hidden (default true). */
   pauseOnHide?: boolean;
+  /** Frame-rate cap at start, 1-60 (default 60 = the display rate). Change it at runtime with game.setFrameRate(). */
+  frameRate?: number;
 }
 
 export interface GameEvents {
@@ -47,6 +51,8 @@ export interface GameEvents {
   pointermove: PointerEvt;
   pointerup: PointerEvt;
   pointercancel: PointerEvt;
+  /** The host is low on memory; engine caches were already dropped. Free what the game can rebuild. */
+  memorywarning: MemoryWarningInfo;
 }
 
 /** Something updated every frame before the stage (tweens, timers, physics...). */
@@ -139,6 +145,11 @@ export class Game extends Emitter<GameEvents> {
   private pointers = new Map<number, PointerRecord>();
   private frameId = 0;
   private lastTime = -1;
+  private fps = 60;
+  /** ms between frames when the Game caps the rate itself (no native cap); 0 = every frame. */
+  private frameInterval = 0;
+  private nextFrameAt = -1;
+  private readonly baseMaxDt: number;
   private running = false;
   private hiddenPaused = false;
   private inputLocks = 0;
@@ -156,8 +167,10 @@ export class Game extends Emitter<GameEvents> {
       maxPixelRatio: 2,
       tapSlop: 24,
       pauseOnHide: true,
+      frameRate: 60,
       ...config,
     };
+    this.baseMaxDt = this.cfg.maxDt;
     this.background = this.cfg.background;
     this.stats = new GameStats(this);
     this.ctx = platform.canvas.getContext('2d');
@@ -181,8 +194,11 @@ export class Game extends Emitter<GameEvents> {
         this.hiddenPaused = false;
       }
       this.lastTime = -1;
+      this.nextFrameAt = -1;
       this.emit('show', undefined);
     });
+    platform.onMemoryWarning?.((info) => this.memoryWarning(info));
+    if (this.cfg.frameRate !== 60) this.setFrameRate(this.cfg.frameRate);
     Game.current = this;
   }
 
@@ -200,9 +216,17 @@ export class Game extends Emitter<GameEvents> {
     if (this.running) return;
     this.running = true;
     this.lastTime = -1;
+    this.nextFrameAt = -1;
     const loop = (t: number) => {
       if (!this.running) return;
       this.frameId = this.platform.requestFrame(loop);
+      const every = this.frameInterval;
+      if (every > 0) {
+        // Software cap: skip host frames until the next slot (2 ms slack for timer jitter); dt spans the skipped ones.
+        if (this.nextFrameAt >= 0 && t < this.nextFrameAt - 2) return;
+        const late = this.nextFrameAt < 0 || t - this.nextFrameAt > every;
+        this.nextFrameAt = late ? t + every : this.nextFrameAt + every;
+      }
       const dt = this.lastTime < 0 ? 1 / 60 : (t - this.lastTime) / 1000;
       this.lastTime = t;
       this.step(dt);
@@ -213,6 +237,38 @@ export class Game extends Emitter<GameEvents> {
   stop(): void {
     this.running = false;
     this.platform.cancelFrame(this.frameId);
+  }
+
+  /** Current frame-rate cap (see setFrameRate). */
+  get frameRate(): number {
+    return this.fps;
+  }
+
+  /**
+   * Caps the frame rate, 1-60 (60 = the display rate, the default). Lower it on menus, pause and idle screens
+   * (30, or 20 for a static title) to save battery and heat; restore 60 for gameplay. Mini-games use the host's
+   * setPreferredFramesPerSecond, other platforms skip frames in the loop. dt stays real time: below 15 fps maxDt
+   * grows to 1.25 frames so updates do not slow down.
+   */
+  setFrameRate(fps: number): void {
+    const f = Number.isFinite(fps) ? Math.min(60, Math.max(1, Math.round(fps))) : 60;
+    this.fps = f;
+    this.cfg.maxDt = Math.max(this.baseMaxDt, 1.25 / f);
+    const native = this.platform.setPreferredFramesPerSecond?.(f) ?? false;
+    this.frameInterval = native || f >= 60 ? 0 : 1000 / f;
+    this.nextFrameAt = -1;
+  }
+
+  /**
+   * Low memory (the platform's onMemoryWarning calls this; tests may too): drops engine caches that rebuild on demand
+   * (tinted textures, Text bitmaps), emits 'memorywarning' so game code frees what it can rebuild (releaseTexture,
+   * textures.delete, CacheContainer.releaseCache, TileMap.releaseChunks), then asks the host for a garbage collection.
+   */
+  memoryWarning(info: MemoryWarningInfo = {}): void {
+    clearTintCache();
+    clearTextBitmaps();
+    this.emit('memorywarning', info);
+    this.platform.triggerGC?.();
   }
 
   /** One frame: update (dt clamped to maxDt) then render. Tests call this directly. */
@@ -236,7 +292,9 @@ export class Game extends Emitter<GameEvents> {
     this.emit('frame', rawDt);
     if (this.paused) return;
     this.time.elapsed += dt;
-    for (const { sys } of this.systems.slice()) sys.update(dt);
+    // addSystem / removers replace the array, so this loop walks the list as it was when the frame started.
+    const systems = this.systems;
+    for (let i = 0; i < systems.length; i++) systems[i]!.sys.update(dt);
     this.stage.tick(dt);
     this.emit('update', dt);
   }
@@ -252,20 +310,29 @@ export class Game extends Emitter<GameEvents> {
     ctx.fillStyle = this.background;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const k = this.pixelRatio * this.scale;
-    ctx.setTransform(k, 0, 0, k, this.offsetX * this.pixelRatio, this.offsetY * this.pixelRatio);
+    const m = rootMat.set(k, 0, 0, k, this.offsetX * this.pixelRatio, this.offsetY * this.pixelRatio);
+    ctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
     this.emit('prerender', ctx);
-    this.stage.render(ctx);
+    // Nodes set absolute transforms and leave the last one's state behind; postrender draws in design space.
+    ctx.save();
+    Node.renderRoot(ctx, this.stage, m);
+    ctx.restore();
     this.emit('postrender', ctx);
     this.stats.endRender(t0, Node.renderCount - drawn0);
   }
 
   /** Registers a per-frame system (runs before the stage, lower priority first). Returns a remover. */
   addSystem(sys: System, priority = 0): () => void {
-    this.systems.push({ sys, priority });
-    this.systems.sort((a, b) => a.priority - b.priority);
+    const next = this.systems.slice();
+    next.push({ sys, priority });
+    next.sort((a, b) => a.priority - b.priority);
+    this.systems = next;
     return () => {
       const i = this.systems.findIndex((s) => s.sys === sys);
-      if (i >= 0) this.systems.splice(i, 1);
+      if (i < 0) return;
+      const rest = this.systems.slice();
+      rest.splice(i, 1);
+      this.systems = rest;
     };
   }
 
@@ -403,18 +470,25 @@ setTextureBackingScale(() => {
 });
 
 const hitMat = new Mat2D();
+const rootMat = new Mat2D();
 
+/** Topmost interactive node under a point in `node`'s parent space. Subtrees without interactive nodes are skipped. */
 function hitNode(node: Node, px: number, py: number): Node | null {
   if (!node.visible || node.destroyed) return null;
-  const p = node.localMatrix(hitMat).invert().apply(px, py);
-  const inside = node.hitTest(p.x, p.y);
-  if (!node.hitClip(p.x, p.y)) return null;
-  if (node.interactiveChildren && node.children.length) {
+  const self = node.interactive;
+  const descend = node.interactiveChildren && node.interactiveDescendants > 0;
+  if (!self && !descend) return null;
+  const m = node.localMatrix(hitMat).invert();
+  const lx = m.a * px + m.c * py + m.e;
+  const ly = m.b * px + m.d * py + m.f;
+  if (!node.hitClip(lx, ly)) return null;
+  if (descend) {
     node.sortChildren();
-    for (let i = node.children.length - 1; i >= 0; i--) {
-      const hit = hitNode(node.children[i]!, p.x, p.y);
+    const ch = node.children;
+    for (let i = ch.length - 1; i >= 0; i--) {
+      const hit = hitNode(ch[i]!, lx, ly);
       if (hit) return hit;
     }
   }
-  return node.interactive && inside ? node : null;
+  return self && node.hitTest(lx, ly) ? node : null;
 }

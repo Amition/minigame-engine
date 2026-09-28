@@ -124,6 +124,16 @@ async function confirmQuit(): Promise<boolean> {
 - The game keeps running under a modal: pause your simulation yourself (a `halted` flag) until `closed`.
 - `showToast(text, { icon, variant: 'info' | 'success' | 'warning' | 'danger', duration, position })`, one at a time.
 - `openModalsOf()` lists open modals (tests: `expect(openModalsOf().length).toBe(1)`).
+- Modals and toasts opened in the game overlay belong to the topmost scene (`game.scenes.top`, so a pushed pause
+  scene owns what it opens). When that scene is left (`go`, `restart`, `pop`, or destroyed) they are removed at
+  once, without animation, and queued toasts are dropped. `closed` then never resolves and `onClose` is not called,
+  so `await dialog.closed; restart()` in the old scene stays asleep instead of restarting the new one.
+- App-level UI that must survive scene changes (update notice, login, "reconnecting"): pass `owner: null`,
+  e.g. `showDialog({ title: 'Update', owner: null })`, `showToast('Online', { owner: null })`. `owner: someNode`
+  ties the modal/toast to that node instead. `modal.open(parent)` with your own parent: the modal lives as long as
+  `parent`, with no scene owner unless you pass one. `modal.owner` tells which node it belongs to.
+- Scenes don't need to close their modals/toasts in `onExit()` any more; do close them yourself when the scene
+  stays but the UI is no longer relevant (e.g. a round restarts inside the same scene).
 
 ## 5. Themes
 
@@ -262,6 +272,35 @@ keepClearZones(game.stage, game); // the active areas, in stage coordinates (tes
 - Test the guarantee both ways: no `covers-keep-clear` issues, and moving a button onto the area makes one
   (`archer/menu.test.ts`).
 
+## Text: measurement memo and bitmap cache
+
+`Text` (so also `Label`, `ui.text`, `ui.title`) memoizes its layout per text + style: `measureNatural()`,
+`measureWrapped(w)` (read-only cached objects), `minContentWidth()` and `measureContentWidth()` are free until `text`
+or a font/measure prop changes. `setStyle` with equal values costs nothing; paint-only props (`color`, `stroke`,
+`shadow`, `align`, `cache`) never re-measure; a `wrapWidth` change re-wraps but keeps the measurements.
+
+Drawing follows `TextStyle.cache`:
+
+| `cache` | Draws | Use for |
+|---|---|---|
+| `'auto'` (default) | a cached bitmap for stroked/shadowed text and for text unchanged for ~30 frames; `fillText` for text that changes often (counters, `countTo`) and for rotated plain text | almost everything |
+| `'bitmap'` | always the bitmap; re-baked when text/style change or a scale animation settles (at most every 6 frames while the scale is >25% off) | big static titles, stroked + shadowed CJK |
+| `'none'` | always `fillText` / `strokeText` | text whose value changes every frame; fading stroked text where the stroke should show through the fill |
+
+```ts
+new Text('Score 0', { fontSize: 40, stroke: { color: '#000', width: 6 }, cache: 'none' });
+ui.title('Game Over').setStyle({ cache: 'bitmap' });   // Label props have no `cache` key: set it on the node
+```
+
+- The bitmap is rasterized at the screen's backing resolution x the accumulated parent scale, at the node's sub-pixel
+  position, and blitted on whole device pixels, so a still label looks exactly like `fillText`. Moving labels blit at
+  fractional positions (slightly softer) and re-bake at the new position after ~6 still frames.
+- Identical labels (same text, style, resolution and sub-pixel position) share one bitmap (refcount). Bitmaps are
+  freed on text change and `destroy()`, listed in `textureStats()` as `text:<text>#n`, and capped at 1.5 M pixels
+  (~5.7 MB) with LRU eviction of bitmaps not drawn for 30 frames: `setTextBitmapBudget(px)`,
+  `textBitmapStats()` (count, MB, bakes, shared, evictions), `clearTextBitmaps()`.
+- Change text styles through `setStyle`; mutating `label.style.stroke.width` in place does not refresh the bitmap.
+
 ## Icons
 
 `icon` props accept a `Texture`, a registry key, or a name. Names resolve in this order: texture `name`,
@@ -278,6 +317,14 @@ every button, drawn untinted (white by default). Register art icons under anothe
 - Fixed `width`s that fit 750 but not a narrow row: prefer `grow: 1` / `%` / `maxWidth`.
 - Text in a row next to buttons: give the text `grow: 1` (and `minWidth: 0` if it must shrink) or `autoFit`.
 - Changing `label.text` re-lays out automatically; changing layout props on a plain Node needs `setUILayout`.
+  A label in a plain row/column/panel whose new text measures the same (timer `00:12` -> `00:13`, fixed or
+  `grow` width) is re-fitted in place without relaying out the screen; a size change relays out the root once.
+- Adding/removing UI children: use `view.add()` / `removeFromParent()` (or `markUILayoutDirty`); the per-frame
+  check watches the node list of the last layout, not the whole tree.
+- Custom widget `draw()` runs every frame: don't call `darken/lighten/mix` or `createLinearGradient` there. Use
+  `uiShade(c, -0.18)` (= `darken(c, 0.18)`), `uiMix(a, b, t)` and a `UIGradientCache` field
+  (`this.grad.get2(ctx, 0, 0, 0, h, top, bottom)`); `drawUIBox(ctx, w, h, props)` caches its gradient per `props`
+  object, so pass the same object each frame.
 - A `Scene` builds UI in `onEnter`; don't build in the constructor (no `game`, no size yet).
 - `mountScreen` twice on the scene replaces the first screen: mount HUD parts into separate child nodes.
 - Screenshots on one device prove nothing: always iphone-se (short), iphone-14 (tall, notch), ipad (wide).

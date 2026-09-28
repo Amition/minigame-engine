@@ -22,8 +22,26 @@ export interface Manifold {
   depth: number;
 }
 
-/** Segment (x0,y0)→(x1,y1) against an axis-aligned rect (slab method). */
-export function segmentVsRect(x0: number, y0: number, x1: number, y1: number, r: Rect): RayHit | null {
+function writeRayHit(out: RayHit | undefined, t: number, x: number, y: number, nx: number, ny: number): RayHit {
+  if (!out) return { t, x, y, nx, ny };
+  out.t = t;
+  out.x = x;
+  out.y = y;
+  out.nx = nx;
+  out.ny = ny;
+  return out;
+}
+
+function writeManifold(out: Manifold | undefined, nx: number, ny: number, depth: number): Manifold {
+  if (!out) return { nx, ny, depth };
+  out.nx = nx;
+  out.ny = ny;
+  out.depth = depth;
+  return out;
+}
+
+/** Segment (x0,y0)→(x1,y1) against an axis-aligned rect (slab method). Writes into `out` when given. */
+export function segmentVsRect(x0: number, y0: number, x1: number, y1: number, r: Rect, out?: RayHit): RayHit | null {
   const dx = x1 - x0;
   const dy = y1 - y0;
   let tmin = 0;
@@ -70,10 +88,10 @@ export function segmentVsRect(x0: number, y0: number, x1: number, y1: number, r:
     if (t2 < tmax) tmax = t2;
     if (tmin > tmax) return null;
   }
-  return { t: tmin, x: x0 + dx * tmin, y: y0 + dy * tmin, nx, ny };
+  return writeRayHit(out, tmin, x0 + dx * tmin, y0 + dy * tmin, nx, ny);
 }
 
-/** Segment against a circle. */
+/** Segment against a circle. Writes into `out` when given. */
 export function segmentVsCircle(
   x0: number,
   y0: number,
@@ -82,13 +100,14 @@ export function segmentVsCircle(
   cx: number,
   cy: number,
   r: number,
+  out?: RayHit,
 ): RayHit | null {
   const dx = x1 - x0;
   const dy = y1 - y0;
   const mx = x0 - cx;
   const my = y0 - cy;
   const c = mx * mx + my * my - r * r;
-  if (c <= 0) return { t: 0, x: x0, y: y0, nx: 0, ny: 0 };
+  if (c <= 0) return writeRayHit(out, 0, x0, y0, 0, 0);
   const a = dx * dx + dy * dy;
   if (a === 0) return null;
   const b = 2 * (mx * dx + my * dy);
@@ -98,7 +117,7 @@ export function segmentVsCircle(
   if (t < 0 || t > 1) return null;
   const x = x0 + dx * t;
   const y = y0 + dy * t;
-  return { t, x, y, nx: (x - cx) / r, ny: (y - cy) / r };
+  return writeRayHit(out, t, x, y, (x - cx) / r, (y - cy) / r);
 }
 
 /**
@@ -148,7 +167,10 @@ export function raycastGrid(
   return null;
 }
 
-/** Two AABBs given by center and half extents. Normal points from A to B along the axis of least penetration. */
+/**
+ * Two AABBs given by center and half extents. Normal points from A to B along the axis of least penetration.
+ * The overlap helpers write into `out` when given (no allocation) and return it, or null when apart.
+ */
 export function aabbOverlap(
   ax: number,
   ay: number,
@@ -158,6 +180,7 @@ export function aabbOverlap(
   by: number,
   bhw: number,
   bhh: number,
+  out?: Manifold,
 ): Manifold | null {
   const dx = bx - ax;
   const px = ahw + bhw - Math.abs(dx);
@@ -165,20 +188,28 @@ export function aabbOverlap(
   const dy = by - ay;
   const py = ahh + bhh - Math.abs(dy);
   if (py <= 0) return null;
-  if (px < py) return { nx: dx < 0 ? -1 : 1, ny: 0, depth: px };
-  return { nx: 0, ny: dy < 0 ? -1 : 1, depth: py };
+  if (px < py) return writeManifold(out, dx < 0 ? -1 : 1, 0, px);
+  return writeManifold(out, 0, dy < 0 ? -1 : 1, py);
 }
 
 /** Two circles. */
-export function circleOverlap(ax: number, ay: number, ar: number, bx: number, by: number, br: number): Manifold | null {
+export function circleOverlap(
+  ax: number,
+  ay: number,
+  ar: number,
+  bx: number,
+  by: number,
+  br: number,
+  out?: Manifold,
+): Manifold | null {
   const dx = bx - ax;
   const dy = by - ay;
   const rr = ar + br;
   const d2 = dx * dx + dy * dy;
   if (d2 >= rr * rr) return null;
   const d = Math.sqrt(d2);
-  if (d === 0) return { nx: 0, ny: 1, depth: rr };
-  return { nx: dx / d, ny: dy / d, depth: rr - d };
+  if (d === 0) return writeManifold(out, 0, 1, rr);
+  return writeManifold(out, dx / d, dy / d, rr - d);
 }
 
 /** AABB (center, half extents) against a circle. Normal points from the box to the circle. */
@@ -190,6 +221,7 @@ export function aabbCircleOverlap(
   cx: number,
   cy: number,
   r: number,
+  out?: Manifold,
 ): Manifold | null {
   const dx = cx - bx;
   const dy = cy - by;
@@ -199,13 +231,13 @@ export function aabbCircleOverlap(
   if (inside) {
     const px = hw - Math.abs(dx);
     const py = hh - Math.abs(dy);
-    if (px < py) return { nx: dx < 0 ? -1 : 1, ny: 0, depth: px + r };
-    return { nx: 0, ny: dy < 0 ? -1 : 1, depth: py + r };
+    if (px < py) return writeManifold(out, dx < 0 ? -1 : 1, 0, px + r);
+    return writeManifold(out, 0, dy < 0 ? -1 : 1, py + r);
   }
   const ex = dx - qx;
   const ey = dy - qy;
   const d2 = ex * ex + ey * ey;
   if (d2 >= r * r) return null;
   const d = Math.sqrt(d2);
-  return { nx: ex / d, ny: ey / d, depth: r - d };
+  return writeManifold(out, ex / d, ey / d, r - d);
 }

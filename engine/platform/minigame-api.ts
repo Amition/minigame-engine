@@ -108,6 +108,16 @@ export interface MgInnerAudioContext {
   onError(cb: (err: MgError) => void): void;
 }
 
+/** wx.setInnerAudioOption / tt.setInnerAudioOption. */
+export interface MgInnerAudioOption {
+  /** Keep other apps' audio playing (default true on wx). */
+  mixWithOther?: boolean;
+  /** iOS: obey the silent switch (default true: muted phones play no game sound). */
+  obeyMuteSwitch?: boolean;
+  /** Play through the speaker instead of the earpiece (default true). */
+  speakerOn?: boolean;
+}
+
 export interface MgRewardedCloseResult {
   /** Watched to the end. WeChat < 2.1.0 passes undefined instead of an object (treated as ended). */
   isEnded?: boolean;
@@ -182,6 +192,15 @@ export interface MiniGameApi {
   createInnerAudioContext?(opts?: Record<string, unknown>): MgInnerAudioContext;
   onAudioInterruptionBegin?(cb: () => void): void;
   onAudioInterruptionEnd?(cb: () => void): void;
+  /** Global audio session options (wx 2.3.0+, tt 1.64.0+). */
+  setInnerAudioOption?(opts: MgInnerAudioOption & Record<string, unknown>): unknown;
+
+  /** wx 2.0.2+ (res.level only on Android), tt, tap. */
+  onMemoryWarning?(cb: (res?: { level?: number }) => void): void;
+  /** Hint to collect garbage now (wx 1.x+, tt, tap). */
+  triggerGC?(): void;
+  /** Render frame rate 1-60 (wx 1.x+, tt, tap). requestAnimationFrame follows it. */
+  setPreferredFramesPerSecond?(fps: number): void;
 
   vibrateShort?(opts?: Record<string, unknown>): unknown;
   vibrateLong?(opts?: Record<string, unknown>): unknown;

@@ -120,25 +120,24 @@ export class World extends Node {
 
   protected override renderContent(ctx: Ctx2D): void {
     this.syncViewport();
-    if (this.clipViewport && this.width > 0 && this.height > 0) {
-      const inv = this.camera.viewMatrix(tmpA).invert();
+    const clip = this.clipViewport && this.width > 0 && this.height > 0;
+    if (clip) {
+      this.saveRenderState(ctx);
+      const m = this.camera.viewMatrix(tmpA).invert();
       const w = this.width;
       const h = this.height;
       ctx.beginPath();
-      const p = inv.apply(0, 0);
-      ctx.moveTo(p.x, p.y);
-      inv.apply(w, 0, p);
-      ctx.lineTo(p.x, p.y);
-      inv.apply(w, h, p);
-      ctx.lineTo(p.x, p.y);
-      inv.apply(0, h, p);
-      ctx.lineTo(p.x, p.y);
+      ctx.moveTo(m.e, m.f);
+      ctx.lineTo(m.a * w + m.e, m.b * w + m.f);
+      ctx.lineTo(m.a * w + m.c * h + m.e, m.b * w + m.d * h + m.f);
+      ctx.lineTo(m.c * h + m.e, m.d * h + m.f);
       ctx.closePath();
       ctx.clip();
     }
-    this.draw(ctx);
+    this.renderDraw(ctx);
     this.renderChildren(ctx);
-    this.drawOver(ctx);
+    this.renderDrawOver(ctx);
+    if (clip) this.restoreRenderState(ctx);
   }
 
   protected override renderChildren(ctx: Ctx2D): void {

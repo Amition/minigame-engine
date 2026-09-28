@@ -146,9 +146,13 @@ ui.icon('art:gear', { size: 40, duotone: ['surface', 'text'] });   // [dark, lig
   multiply would leave painted holes black.
 - **Cache**: results are cached per source Texture object + params (a WeakMap, so nothing leaks with the source)
   and baked at the source's resolution (`resolution` overrides, `'auto'` allowed). Re-registering a key
-  (`textures.set`) gives a new Texture, so the next call bakes a fresh tint. Keep up to 16 variants per source;
-  every distinct colour is a separate canvas, so do not animate `tint` through many colours (flash with
-  `alpha`, a fixed `fill` tint or a second sprite). `clearTintCache()` forgets everything (tests, theme switch).
+  (`textures.set`) gives a new Texture, so the next call bakes a fresh tint. Keep up to 16 variants per source:
+  baking a 17th releases the oldest (its canvas shrinks to 1x1), so a Texture you stored from `tintTexture`
+  goes blank if 16 newer colours of the same source were baked after it (and `Sprite.tint` with more colours
+  than that re-bakes constantly). For more colours of one art, bake them once with `bakeTexture` into your own
+  keys (`textures.set`). Every distinct colour
+  is a separate canvas, so do not animate `tint` through many colours (flash with `alpha`, a fixed `fill` tint
+  or a second sprite). `clearTintCache()` forgets everything (tests, theme switch; `game.memoryWarning()`).
   A white multiply (or `amount` 0) returns the source itself.
 - **Keys**: strings resolve through `textures`; an unregistered key returns a 1x1 transparent placeholder named
   `missing:<key>` (not cached). Widgets resolve the key themselves, so `ui.icon(key, { tint })` keeps the glyph

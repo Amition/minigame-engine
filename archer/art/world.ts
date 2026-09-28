@@ -72,12 +72,29 @@ function dustField(w: number, h: number): DustField {
 
 const wrap = (v: number, m: number) => ((v % m) + m) % m;
 
-/** Full-screen background (view-sized, scene coordinates): dark void, drifting dust, faint big squares. */
-export function drawBackdrop(ctx: Ctx2D, w: number, h: number, time: number): void {
+/**
+ * Speck subpath: a circle as four quads with control points on its bounding box, the shape Skia rasterizes a small
+ * arc as. ctx.arc would look the same but costs time proportional to the path length on @napi-rs/canvas.
+ */
+function speckPath(ctx: Ctx2D, x: number, y: number, r: number): void {
+  ctx.moveTo(x + r, y);
+  ctx.quadraticCurveTo(x + r, y + r, x, y + r);
+  ctx.quadraticCurveTo(x - r, y + r, x - r, y);
+  ctx.quadraticCurveTo(x - r, y - r, x, y - r);
+  ctx.quadraticCurveTo(x + r, y - r, x + r, y);
+}
+
+/**
+ * Full-screen background (view-sized, scene coordinates): dark void, drifting dust, faint big squares.
+ * `fill` false leaves out the void colour, for a canvas that is already COLORS.bg underneath.
+ */
+export function drawBackdrop(ctx: Ctx2D, w: number, h: number, time: number, fill = true): void {
   setArtTime(time);
   const d = dustField(w, h);
-  ctx.fillStyle = COLORS.bg;
-  ctx.fillRect(0, 0, w, h);
+  if (fill) {
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, w, h);
+  }
 
   for (let k = 0; k < d.sq.length; k += 5) {
     const cx = d.sq[k]!;
@@ -102,10 +119,7 @@ export function drawBackdrop(ctx: Ctx2D, w: number, h: number, time: number): vo
     const c = DUST_CLASSES[ci]!;
     ctx.beginPath();
     for (let i = d.classStart[ci]!; i < d.classStart[ci + 1]!; i++) {
-      const x = wrap(d.x[i]! + d.vx[i]! * time, W) - DUST_MARGIN;
-      const y = wrap(d.y[i]! + d.vy[i]! * time, H) - DUST_MARGIN;
-      ctx.moveTo(x + c.r, y);
-      ctx.arc(x, y, c.r, 0, TAU);
+      speckPath(ctx, wrap(d.x[i]! + d.vx[i]! * time, W) - DUST_MARGIN, wrap(d.y[i]! + d.vy[i]! * time, H) - DUST_MARGIN, c.r);
     }
     ctx.globalAlpha = c.alpha;
     ctx.fillStyle = c.color;

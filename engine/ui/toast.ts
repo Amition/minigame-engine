@@ -3,6 +3,7 @@ import type { Node } from '../scene/node';
 import { animateUI } from './anim';
 import { UIIcon, type UIIconSource } from './icon';
 import { Label } from './label';
+import { bindUIOwner, currentUIOwner } from './owner';
 import type { UIColor, UIColorToken } from './theme';
 import { UIView } from './view';
 
@@ -15,7 +16,15 @@ export interface ToastOptions {
   variant?: UIToastVariant;
   /** Default 'top' (below the safe-area top). */
   position?: 'top' | 'center' | 'bottom';
+  /**
+   * Node the toast belongs to: it is dropped (from the queue, or from the screen at once) when the owner is
+   * destroyed or, for a scene, left. Default: the topmost scene when queued in the game overlay's toast host.
+   * `null`: app-level, survives scene changes.
+   */
+  owner?: Node | null;
 }
+
+const same = (a: number, b: number) => a === b || (a !== a && b !== b);
 
 const FILL: Record<UIToastVariant, UIColor> = {
   info: 'rgba(16,16,40,0.92)',
@@ -38,6 +47,9 @@ export class Toast extends UIView {
   readonly position: 'top' | 'center' | 'bottom';
   /** 'queued' → 'showing' → 'done'. */
   state: 'queued' | 'showing' | 'done' = 'queued';
+  /** @internal ToastOptions.owner as given (undefined = default). */
+  readonly ownerProp: Node | null | undefined;
+  private unbindOwner: (() => void) | null = null;
   private t = 0;
 
   constructor(text: string, opts: ToastOptions = {}) {
@@ -60,6 +72,7 @@ export class Toast extends UIView {
     );
     this.duration = opts.duration ?? 2;
     this.position = opts.position ?? 'top';
+    this.ownerProp = opts.owner;
     if (opts.icon) this.add(new UIIcon({ src: opts.icon, size: 40, color: ON[v], shrink: 0 }));
     this.label = this.add(new Label(text, { size: 30, weight: 'bold', color: ON[v], align: 'center', shrink: 1 }));
     this.visible = false;
@@ -67,6 +80,12 @@ export class Toast extends UIView {
 
   get text(): string {
     return this.label.text;
+  }
+
+  /** @internal Called by the host on enqueue: the toast is destroyed with `owner` (see ToastOptions.owner). */
+  bindOwner(owner: Node): void {
+    this.unbindOwner?.();
+    this.unbindOwner = bindUIOwner(owner, () => this.destroy());
   }
 
   /** @internal Called by the host when it is this toast's turn. */
@@ -96,6 +115,13 @@ export class Toast extends UIView {
     if (this.t >= this.duration + 0.25) this.hide();
   }
 
+  protected override onDestroy(): void {
+    this.unbindOwner?.();
+    this.unbindOwner = null;
+    this.state = 'done';
+    super.onDestroy();
+  }
+
   override describe() {
     return { ...super.describe(), text: this.label.text, state: this.state };
   }
@@ -105,17 +131,28 @@ export class Toast extends UIView {
 export class ToastHost extends UIView {
   private queue: Toast[] = [];
   private current: Toast | null = null;
-  private insetsKey = '';
+  private synced = false;
+  private sw = 0;
+  private sh = 0;
+  private st = 0;
+  private sb = 0;
 
   constructor() {
     super({ position: 'absolute', inset: 0, direction: 'stack', align: 'center', zIndex: 1000, lintRole: 'decor' }, 'ToastHost');
     this.interactive = false;
   }
 
+  /**
+   * Queues `t`. Its owner (ToastOptions.owner) defaults to the topmost scene when this host sits in the game
+   * overlay; a toast whose owner goes away leaves the queue (or the screen) at once.
+   */
   enqueue(t: Toast): Toast {
+    const owner = t.ownerProp !== undefined ? t.ownerProp : this.parent === Game.current?.overlay ? currentUIOwner() : null;
     this.queue.push(t);
     this.add(t);
-    this.pump();
+    t.once('destroyed', () => this.forget(t));
+    if (owner) t.bindOwner(owner);
+    if (!t.destroyed) this.pump();
     return t;
   }
 
@@ -125,9 +162,16 @@ export class ToastHost extends UIView {
   }
 
   clear(): void {
-    for (const t of this.queue) t.destroy();
+    const q = this.queue;
     this.queue = [];
+    for (const t of q) t.destroy();
     this.current?.hide();
+  }
+
+  private forget(t: Toast): void {
+    const i = this.queue.indexOf(t);
+    if (i >= 0) this.queue.splice(i, 1);
+    if (this.current === t) this.current = null;
   }
 
   private pump(): void {
@@ -154,9 +198,21 @@ export class ToastHost extends UIView {
 
   uiSync(): boolean {
     const g = Game.current;
-    const key = g ? `${g.view.width}x${g.view.height}:${g.safeInsets.top},${g.safeInsets.bottom}` : '';
-    if (key === this.insetsKey) return false;
-    this.insetsKey = key;
+    if (!g) {
+      if (!this.synced) return false;
+      this.synced = false;
+      return true;
+    }
+    const w = g.view.width;
+    const h = g.view.height;
+    const t = g.safeInsets.top;
+    const b = g.safeInsets.bottom;
+    if (this.synced && same(w, this.sw) && same(h, this.sh) && same(t, this.st) && same(b, this.sb)) return false;
+    this.synced = true;
+    this.sw = w;
+    this.sh = h;
+    this.st = t;
+    this.sb = b;
     return true;
   }
 

@@ -13,8 +13,8 @@ export default defineApp({
   scenes: {
     title: () => new TitleScene(),
     play: () => new PlayScene(),
-    gallery: () => new GalleryScene(),
   },
+  devScenes: process.env.NODE_ENV === 'production' ? undefined : { gallery: () => new GalleryScene() },
   start: 'title',
   boot(game) {
     setUITheme('light');

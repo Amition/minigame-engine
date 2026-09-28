@@ -365,6 +365,8 @@ export class Line extends Node {
     }
     ctx.stroke();
     if (this.dash) ctx.setLineDash(NO_DASH);
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
     if (this.arrow > 0) {
       const a = this.arrow;
       const hw = Math.max(a * 0.55, this.thickness);
@@ -503,6 +505,7 @@ export class ArcProgress extends Node {
     ctx.lineCap = v >= 1 ? 'butt' : this.cap;
     ctx.strokeStyle = resolvePaintStyle(ctx, this.color);
     ctx.stroke();
+    ctx.lineCap = 'butt';
   }
 
   override describe() {

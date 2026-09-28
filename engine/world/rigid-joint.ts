@@ -174,6 +174,13 @@ function bodyPoint(b: RigidBody, lx: number, ly: number, alpha: number): Vec2 {
   return { x: x + c * lx - s * ly, y: y + s * lx + c * ly };
 }
 
+/** Math.sqrt is correctly rounded on every engine; Math.hypot is implementation-defined (breaks cross-engine replays). */
+export function pointDistance(p: Vec2, q: Vec2): number {
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
 /** World point -> body-local point (current pose). */
 function toLocal(b: RigidBody, x: number, y: number): Vec2 {
   const dx = x - b.x;
@@ -291,7 +298,7 @@ export class RigidDistanceJoint extends RigidJoint {
     this.localAnchorB = { x: opts.anchorB?.x ?? 0, y: opts.anchorB?.y ?? 0 };
     const pa = this.anchorWorldA();
     const pb = this.anchorWorldB();
-    const length = Math.max(0, opts.length ?? Math.hypot(pb.x - pa.x, pb.y - pa.y));
+    const length = Math.max(0, opts.length ?? pointDistance(pa, pb));
     this.springHz = opts.springHz ?? 0;
     this.dampingRatio = opts.dampingRatio ?? 1;
     const spring = this.springHz > 0;
@@ -304,7 +311,7 @@ export class RigidDistanceJoint extends RigidJoint {
   currentLength(): number {
     const pa = this.anchorWorldA();
     const pb = this.anchorWorldB();
-    return Math.hypot(pb.x - pa.x, pb.y - pa.y);
+    return pointDistance(pa, pb);
   }
 
   /** Changes the rest length and bounds (rope reel, spring target); wakes the bodies. */
@@ -348,7 +355,7 @@ export class RigidDistanceJoint extends RigidJoint {
     const rBy = (this.rBy = b.s * lb.x + b.c * lb.y);
     const dx = b.x + rBx - a.x - rAx;
     const dy = b.y + rBy - a.y - rAy;
-    const len = Math.hypot(dx, dy);
+    const len = Math.sqrt(dx * dx + dy * dy);
     this.current = len;
     if (len > 1e-6) {
       this.ux = dx / len;
@@ -444,7 +451,7 @@ export class RigidDistanceJoint extends RigidJoint {
     const rBy = sB * lb.x + cB * lb.y;
     const dx = b.x + rBx - a.x - rAx;
     const dy = b.y + rBy - a.y - rAy;
-    const len = Math.hypot(dx, dy);
+    const len = Math.sqrt(dx * dx + dy * dy);
     if (len < 1e-6) return true;
     let C: number;
     if (this.minLength === this.maxLength || len < this.minLength) C = len - this.minLength;
@@ -576,7 +583,7 @@ export class RigidRevoluteJoint extends RigidJoint {
   }
 
   reactionForce(): number {
-    return Math.hypot(this.ix, this.iy) * this.invH;
+    return Math.sqrt(this.ix * this.ix + this.iy * this.iy) * this.invH;
   }
 
   override reactionTorque(): number {
@@ -712,7 +719,7 @@ export class RigidRevoluteJoint extends RigidJoint {
     const rBy = sB * lb.x + cB * lb.y;
     const cx = b.x + rBx - a.x - rAx;
     const cy = b.y + rBy - a.y - rAy;
-    const positionError = Math.hypot(cx, cy);
+    const positionError = Math.sqrt(cx * cx + cy * cy);
     const mA = a.invMass;
     const mB = b.invMass;
     const k11 = mA + mB + rAy * rAy * iA + rBy * rBy * iB;
@@ -781,7 +788,7 @@ export class RigidWeldJoint extends RigidJoint {
   }
 
   reactionForce(): number {
-    return Math.hypot(this.ix, this.iy) * this.invH;
+    return Math.sqrt(this.ix * this.ix + this.iy * this.iy) * this.invH;
   }
 
   override reactionTorque(): number {
@@ -898,7 +905,7 @@ export class RigidWeldJoint extends RigidJoint {
     const a33 = iA + iB;
     const c1x = b.x + rBx - a.x - rAx;
     const c1y = b.y + rBy - a.y - rAy;
-    const positionError = Math.hypot(c1x, c1y);
+    const positionError = Math.sqrt(c1x * c1x + c1y * c1y);
     let angularError = 0;
     let px: number;
     let py: number;
@@ -982,7 +989,7 @@ export class RigidMouseJoint extends RigidJoint {
   }
 
   reactionForce(): number {
-    return Math.hypot(this.ix, this.iy) * this.invH;
+    return Math.sqrt(this.ix * this.ix + this.iy * this.iy) * this.invH;
   }
 
   protected describeExtra(): string {

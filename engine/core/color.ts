@@ -35,13 +35,21 @@ const NAMED: Record<string, string> = {
 };
 
 const cache = new Map<string, RGBA>();
+const PARSE_CACHE_MAX = 2048;
+
+/** Cached parse result: shared, never mutate it. */
+function parsed(input: Color): RGBA {
+  const hit = cache.get(input);
+  if (hit) return hit;
+  const out = parseUncached(input.trim().toLowerCase());
+  if (cache.size >= PARSE_CACHE_MAX) cache.clear();
+  cache.set(input, out);
+  return out;
+}
 
 export function parseColor(input: Color): RGBA {
-  const hit = cache.get(input);
-  if (hit) return { ...hit };
-  const out = parseUncached(input.trim().toLowerCase());
-  cache.set(input, out);
-  return { ...out };
+  const p = parsed(input);
+  return { r: p.r, g: p.g, b: p.b, a: p.a };
 }
 
 function parseUncached(s: string): RGBA {
@@ -81,15 +89,50 @@ function parseUncached(s: string): RGBA {
   throw new Error(`parseColor: unsupported color "${s}"`);
 }
 
+// Direct-mapped cache of toCss() strings keyed by the rounded channels and the alpha in thousandths (1001 = opaque),
+// so animated colours (tweens) reuse strings instead of building one per frame. Bounded: collisions overwrite.
+const CSS_SLOTS = 4096;
+const cssRgb = new Int32Array(CSS_SLOTS).fill(-1);
+const cssAlpha = new Int16Array(CSS_SLOTS);
+const cssText: string[] = new Array<string>(CSS_SLOTS).fill('');
+const HEX2: readonly string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+
+/** '#rrggbb' when opaque, else 'rgba(r,g,b,a)' with a rounded to 3 decimals. Doesn't keep `c`. */
 export function toCss(c: RGBA): Color {
   const r = Math.round(clamp(c.r, 0, 255));
   const g = Math.round(clamp(c.g, 0, 255));
   const b = Math.round(clamp(c.b, 0, 255));
-  if (c.a >= 1) return '#' + hex2(r) + hex2(g) + hex2(b);
-  return `rgba(${r},${g},${b},${+clamp01(c.a).toFixed(3)})`;
+  const opaque = c.a >= 1;
+  const x = opaque ? 0 : clamp01(c.a) * 1000;
+  const q = opaque ? 1001 : Math.round(x);
+  // NaN channels, and products landing exactly on .5 (toFixed rounds the exact value, which may lie below): uncached.
+  if (!(r + g + b + q >= 0) || x - Math.floor(x) === 0.5) return cssUncached(r, g, b, c.a);
+  const rgb = (r << 16) | (g << 8) | b;
+  const slot = (rgb ^ (rgb >>> 11) ^ (q * 2531)) & (CSS_SLOTS - 1);
+  if (cssRgb[slot] === rgb && cssAlpha[slot] === q) return cssText[slot]!;
+  const s = opaque ? '#' + HEX2[r] + HEX2[g] + HEX2[b] : `rgba(${r},${g},${b},${q / 1000})`;
+  cssRgb[slot] = rgb;
+  cssAlpha[slot] = q;
+  cssText[slot] = s;
+  return s;
+}
+
+function cssUncached(r: number, g: number, b: number, a: number): Color {
+  if (a >= 1) return '#' + hex2(r) + hex2(g) + hex2(b);
+  return `rgba(${r},${g},${b},${+clamp01(a).toFixed(3)})`;
 }
 
 const hex2 = (n: number) => n.toString(16).padStart(2, '0');
+
+const scratch: RGBA = { r: 0, g: 0, b: 0, a: 1 };
+
+function scratchCss(r: number, g: number, b: number, a: number): Color {
+  scratch.r = r;
+  scratch.g = g;
+  scratch.b = b;
+  scratch.a = a;
+  return toCss(scratch);
+}
 
 /** h in degrees, s/l in 0..1. Returns r,g,b in 0..255. */
 export function hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: number } {
@@ -120,18 +163,16 @@ export function rgbToHsl(c: RGBA): { h: number; s: number; l: number } {
   return { h: h * 60, s, l };
 }
 
-export const rgb = (r: number, g: number, b: number, a = 1): Color => toCss({ r, g, b, a });
-export const hsl = (h: number, s: number, l: number, a = 1): Color => toCss({ ...hslToRgb(h, s, l), a });
+export const rgb = (r: number, g: number, b: number, a = 1): Color => scratchCss(r, g, b, a);
+export const hsl = (h: number, s: number, l: number, a = 1): Color => {
+  const c = hslToRgb(h, s, l);
+  return scratchCss(c.r, c.g, c.b, a);
+};
 
 export function mix(a: Color, b: Color, t: number): Color {
-  const x = parseColor(a);
-  const y = parseColor(b);
-  return toCss({
-    r: x.r + (y.r - x.r) * t,
-    g: x.g + (y.g - x.g) * t,
-    b: x.b + (y.b - x.b) * t,
-    a: x.a + (y.a - x.a) * t,
-  });
+  const x = parsed(a);
+  const y = parsed(b);
+  return scratchCss(x.r + (y.r - x.r) * t, x.g + (y.g - x.g) * t, x.b + (y.b - x.b) * t, x.a + (y.a - x.a) * t);
 }
 
 export const lighten = (c: Color, amount: number): Color => adjustHsl(c, 0, 0, amount);
@@ -139,18 +180,20 @@ export const darken = (c: Color, amount: number): Color => adjustHsl(c, 0, 0, -a
 export const saturate = (c: Color, amount: number): Color => adjustHsl(c, 0, amount, 0);
 
 export function adjustHsl(c: Color, dh: number, ds: number, dl: number): Color {
-  const p = parseColor(c);
+  const p = parsed(c);
   const { h, s, l } = rgbToHsl(p);
-  return toCss({ ...hslToRgb(h + dh, clamp01(s + ds), clamp01(l + dl)), a: p.a });
+  const q = hslToRgb(h + dh, clamp01(s + ds), clamp01(l + dl));
+  return scratchCss(q.r, q.g, q.b, p.a);
 }
 
 export function withAlpha(c: Color, a: number): Color {
-  return toCss({ ...parseColor(c), a });
+  const p = parsed(c);
+  return scratchCss(p.r, p.g, p.b, a);
 }
 
 /** WCAG relative luminance, 0..1. */
 export function luminance(c: Color): number {
-  const p = parseColor(c);
+  const p = parsed(c);
   const ch = (v: number) => {
     v /= 255;
     return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;

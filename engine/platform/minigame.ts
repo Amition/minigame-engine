@@ -4,8 +4,10 @@ import type {
   AdService,
   AudioBackend,
   AudioInstance,
+  AudioLoadHint,
   KeyValueStorage,
   LoginResult,
+  MemoryWarningInfo,
   Platform,
   PlatformKeyEvent,
   PlayOptions,
@@ -20,6 +22,7 @@ import type {
   MgError,
   MgFileSystemManager,
   MgInnerAudioContext,
+  MgInnerAudioOption,
   MgInterstitialAd,
   MgRewardedCloseResult,
   MgRewardedVideoAd,
@@ -43,8 +46,13 @@ export interface MiniGameOptions {
   audioVoices?: number;
   /** Options for createInnerAudioContext for short sounds (wx: { useWebAudioImplement: true }). */
   sfxAudioOptions?: Record<string, unknown>;
-  /** Files larger than this (bytes) count as long audio (music) and never get sfxAudioOptions (default 256 KB). */
+  /**
+   * Without a load hint (AudioManager sends `stream` from the manifest kind), files larger than this (bytes, via
+   * statSync) count as long audio (music) and never get sfxAudioOptions (default 256 KB).
+   */
   longAudioBytes?: number;
+  /** Passed to setInnerAudioOption at startup (e.g. { obeyMuteSwitch: false }); not called when absent. */
+  innerAudioOption?: MgInnerAudioOption;
   /** Arguments for vibrateShort (wx/tap require { type }, tt takes none). */
   vibrateShortArgs?: Record<string, unknown>;
   /** Extra arguments for api.login (e.g. tt: { force: false }). */
@@ -226,9 +234,13 @@ export function mgLanguage(api: MiniGameApi): string | undefined {
 
 // ------------------------------------------------------------------ storage
 
-/** get/set/removeStorageSync + getStorageInfoSync().keys; in-memory when the API is missing. */
-class MiniGameStorage implements KeyValueStorage {
+/**
+ * get/set/removeStorageSync + getStorageInfoSync().keys; in-memory when the API is missing. The key list is read once
+ * (getStorageInfoSync is a slow synchronous call) and kept in step by set/remove, so reads of missing keys stay cheap.
+ */
+export class MiniGameStorage implements KeyValueStorage {
   private readonly mem = new Map<string, string>();
+  private known: Set<string> | null = null;
 
   constructor(private readonly api: MiniGameApi) {}
 
@@ -237,7 +249,7 @@ class MiniGameStorage implements KeyValueStorage {
     if (!api.getStorageSync) return this.mem.get(key) ?? null;
     const v = attempt(() => api.getStorageSync!(key));
     // Missing keys read back as '' on every platform; only the key list tells an empty string apart.
-    if (v === undefined || v === null || v === '') return v === '' && this.keys().includes(key) ? '' : null;
+    if (v === undefined || v === null || v === '') return v === '' && this.knownKeys().has(key) ? '' : null;
     return typeof v === 'string' ? v : JSON.stringify(v);
   }
 
@@ -249,7 +261,9 @@ class MiniGameStorage implements KeyValueStorage {
     }
     try {
       api.setStorageSync(key, value);
+      this.known?.add(key);
     } catch (e) {
+      this.known = null;
       console.warn(`[storage] set "${key}" failed: ${errText(e)}`);
     }
   }
@@ -257,12 +271,24 @@ class MiniGameStorage implements KeyValueStorage {
   remove(key: string): void {
     this.mem.delete(key);
     attempt(() => this.api.removeStorageSync?.(key));
+    this.known?.delete(key);
   }
 
   keys(): string[] {
-    const api = this.api;
-    if (!api.getStorageInfoSync) return [...this.mem.keys()];
-    return attempt(() => api.getStorageInfoSync!().keys.slice()) ?? [];
+    if (!this.api.getStorageInfoSync) return [...this.mem.keys()];
+    return [...this.knownKeys()];
+  }
+
+  /** Forgets the cached key list (the next read asks the host again), e.g. after writing storage directly. */
+  refresh(): void {
+    this.known = null;
+  }
+
+  private knownKeys(): Set<string> {
+    if (this.known) return this.known;
+    const list = attempt(() => this.api.getStorageInfoSync?.().keys);
+    if (!Array.isArray(list)) return new Set(this.mem.keys());
+    return (this.known = new Set(list));
   }
 }
 
@@ -326,6 +352,8 @@ interface Voice {
   token: number;
   /** canplay (or error) seen. */
   loaded: boolean;
+  /** Created without sfxOptions (streamed decoder): the only kind a looping play may reuse. */
+  plain: boolean;
   ready?: () => void;
 }
 
@@ -333,7 +361,9 @@ const STOPPED: AudioInstance = { stop: noop, setVolume: noop, playing: false };
 
 /**
  * InnerAudioContext backend. One context plays one sound at a time, so each key has a small pool of contexts
- * (voices) for overlapping sfx. loadPcm writes a WAV into USER_DATA_PATH when the file system allows it.
+ * (voices) for overlapping sfx. Streamed sounds (music) get plain contexts, short ones `sfxOptions`
+ * (wx: useWebAudioImplement, fully decoded for low latency). In dev builds loadPcm writes a WAV into
+ * USER_DATA_PATH when the file system allows it.
  */
 export class MiniGameAudio implements AudioBackend {
   loadPcm?: (key: string, pcm: Float32Array, sampleRate: number) => Promise<void>;
@@ -356,7 +386,8 @@ export class MiniGameAudio implements AudioBackend {
     this.maxVoices = Math.max(1, opts.voices ?? 4);
     this.longBytes = opts.longBytes ?? 256 * 1024;
     const dir = api.env?.USER_DATA_PATH;
-    if (api.createInnerAudioContext && fs?.writeFileSync && dir) {
+    // Synth fallback only: the inline NODE_ENV test lets release bundles drop it together with encodeWav.
+    if (process.env.NODE_ENV !== 'production' && api.createInnerAudioContext && fs?.writeFileSync && dir) {
       this.loadPcm = async (key, pcm, sampleRate) => {
         const path = `${dir}/pcm-${key.replace(/[^\w.-]/g, '_')}.wav`;
         const wav = encodeWav(pcm, sampleRate);
@@ -370,12 +401,13 @@ export class MiniGameAudio implements AudioBackend {
     return typeof this.api.createInnerAudioContext === 'function';
   }
 
-  async load(key: string, src: string): Promise<void> {
+  /** `hint.stream` (music) picks a plain streamed context; without a hint, files over longAudioBytes count as long. */
+  async load(key: string, src: string, hint?: AudioLoadHint): Promise<void> {
     const path = joinAsset(this.base, src);
-    const size = attempt(() => this.fs?.statSync?.(path).size);
-    this.register(key, path, size !== undefined && size > this.longBytes);
+    const long = hint?.stream ?? this.isLongFile(path);
+    this.register(key, path, long);
     if (!this.supported) return;
-    const voice = this.pool(key)[0] ?? this.addVoice(key, false);
+    const voice = this.pool(key)[0] ?? this.addVoice(key, long);
     if (voice.loaded) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, 3000);
@@ -390,6 +422,21 @@ export class MiniGameAudio implements AudioBackend {
 
   isLoaded(key: string): boolean {
     return this.srcs.has(key);
+  }
+
+  /** Destroys the key's InnerAudioContexts (they are not released automatically) and forgets its file. */
+  unload(key: string): void {
+    for (const v of this.pools.get(key) ?? []) {
+      v.token = 0;
+      v.playing = false;
+      v.suspended = false;
+      attempt(() => v.ctx.destroy());
+      v.ready?.();
+    }
+    this.pools.delete(key);
+    this.srcs.delete(key);
+    this.long.delete(key);
+    this.warned.delete(key);
   }
 
   play(key: string, opts: PlayOptions = {}): AudioInstance {
@@ -475,8 +522,13 @@ export class MiniGameAudio implements AudioBackend {
     return this.pools.get(key)?.length ?? 0;
   }
 
+  private isLongFile(path: string): boolean {
+    const size = attempt(() => this.fs?.statSync?.(path).size);
+    return size !== undefined && size > this.longBytes;
+  }
+
   private register(key: string, path: string, long: boolean): void {
-    if (this.srcs.get(key) !== path) {
+    if (this.srcs.get(key) !== path || this.long.has(key) !== long) {
       for (const v of this.pools.get(key) ?? []) attempt(() => v.ctx.destroy());
       this.pools.delete(key);
     }
@@ -498,7 +550,7 @@ export class MiniGameAudio implements AudioBackend {
   private addVoice(key: string, loop: boolean): Voice {
     const plain = loop || this.long.has(key) || !this.sfxOptions;
     const ctx = this.api.createInnerAudioContext!(plain ? undefined : { ...this.sfxOptions });
-    const v: Voice = { ctx, playing: false, suspended: false, token: 0, loaded: false };
+    const v: Voice = { ctx, playing: false, suspended: false, token: 0, loaded: false, plain };
     ctx.src = this.srcs.get(key)!;
     ctx.onCanplay?.(() => {
       v.loaded = true;
@@ -519,9 +571,13 @@ export class MiniGameAudio implements AudioBackend {
 
   private pick(key: string, loop: boolean): Voice {
     const pool = this.pool(key);
-    const idle = pool.find((v) => !v.playing && !v.suspended);
+    const free = (v: Voice) => !v.playing && !v.suspended;
+    // A loop never reuses a fully decoded sfx context (e.g. the one load() created for an unhinted short file).
+    const idle = pool.find((v) => free(v) && (v.plain || !loop));
     if (idle) return idle;
     if (pool.length < this.maxVoices) return this.addVoice(key, loop);
+    const any = pool.find(free);
+    if (any) return any;
     let oldest: Voice | undefined;
     for (const v of pool) if (!v.ctx.loop && (!oldest || v.token < oldest.token)) oldest = v;
     return oldest ?? pool[0]!;
@@ -669,6 +725,8 @@ export class MiniGamePlatform implements Platform {
   readonly language: string | undefined;
   /** Present only when the runtime has onKeyDown / onKeyUp (PC clients). */
   readonly onKey?: (cb: (e: PlatformKeyEvent) => void) => () => void;
+  /** Present only when the runtime has onMemoryWarning. */
+  readonly onMemoryWarning?: (cb: (info: MemoryWarningInfo) => void) => () => void;
 
   private readonly base: string;
   private readonly fs: MgFileSystemManager | undefined;
@@ -677,6 +735,7 @@ export class MiniGamePlatform implements Platform {
   private readonly hideCbs = new Listeners<void>();
   private readonly resizeCbs = new Listeners<void>();
   private readonly keyCbs = new Listeners<PlatformKeyEvent>();
+  private readonly memoryCbs = new Listeners<MemoryWarningInfo>();
   /** Held keys: code → key. */
   private readonly heldKeys = new Map<string, string>();
   private readonly shareDefaults: ShareOptions;
@@ -742,6 +801,13 @@ export class MiniGamePlatform implements Platform {
     // Audio is interrupted by calls / alarms (wx, tt); the Game suspends on hide itself.
     attempt(() => api.onAudioInterruptionBegin?.(() => this.audio.suspend()));
     attempt(() => api.onAudioInterruptionEnd?.(() => this.audio.resume()));
+    if (opts.innerAudioOption) attempt(() => api.setInnerAudioOption?.({ ...opts.innerAudioOption, fail: noop }));
+    if (typeof api.onMemoryWarning === 'function') {
+      this.onMemoryWarning = (cb) => this.memoryCbs.add(cb);
+      attempt(() =>
+        api.onMemoryWarning!((res) => this.memoryCbs.emit(typeof res?.level === 'number' ? { level: res.level } : {})),
+      );
+    }
 
     // Passive share: wx/tt/tap keep the menu item disabled until showShareMenu; the callback supplies the content.
     attempt(() =>
@@ -819,6 +885,17 @@ export class MiniGamePlatform implements Platform {
 
   share(opts: ShareOptions): void {
     attempt(() => this.api.shareAppMessage?.({ ...shareContent({ ...this.shareDefaults, ...opts }), fail: noop }));
+  }
+
+  triggerGC(): void {
+    attempt(() => this.api.triggerGC?.());
+  }
+
+  setPreferredFramesPerSecond(fps: number): boolean {
+    const api = this.api;
+    if (typeof api.setPreferredFramesPerSecond !== 'function') return false;
+    const n = Math.min(60, Math.max(1, Math.round(fps)));
+    return attempt(() => (api.setPreferredFramesPerSecond!(n), true)) ?? false;
   }
 
   login(): Promise<LoginResult> {

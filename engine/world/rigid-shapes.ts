@@ -94,7 +94,7 @@ function makePolygon(flat: number[], box: boolean): RigidPolygonShape {
     const x = flat[i * 2]! - cx;
     const y = flat[i * 2 + 1]! - cy;
     vertices.push(x, y);
-    extent = Math.max(extent, Math.hypot(x, y));
+    extent = Math.max(extent, Math.sqrt(x * x + y * y));
     minX = Math.min(minX, x);
     minY = Math.min(minY, y);
     maxX = Math.max(maxX, x);
@@ -104,7 +104,7 @@ function makePolygon(flat: number[], box: boolean): RigidPolygonShape {
     const j = (i + 1) % n;
     const ex = vertices[j * 2]! - vertices[i * 2]!;
     const ey = vertices[j * 2 + 1]! - vertices[i * 2 + 1]!;
-    const len = Math.hypot(ex, ey);
+    const len = Math.sqrt(ex * ex + ey * ey);
     normals.push(ey / len, -ex / len);
   }
   return {

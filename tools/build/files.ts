@@ -1,7 +1,8 @@
 // Per-target package files, asset copying, size accounting and a small zip writer.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
-import { crc32, deflateRawSync } from 'node:zlib';
+import { crc32, deflateRawSync, gzipSync } from 'node:zlib';
+import type { Metafile } from 'esbuild';
 import type { AppMeta, BundleTarget } from './config';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -193,6 +194,65 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+export interface CodeBreakdown {
+  bytes: number;
+  gzip: number;
+  /** Output bytes per source folder, largest first. Bundler glue (wrapper, helpers) is not attributed. */
+  folders: { folder: string; bytes: number }[];
+}
+
+/**
+ * Folder of a metafile input path (relative to the cwd): the first two directories (`engine/ui`, `game/art`),
+ * `node_modules/<package>`, or `(<namespace>)` for plugin modules and `(entry)` for the generated entry.
+ */
+export function sourceFolder(input: string): string {
+  if (input === '<stdin>') return '(entry)';
+  const ns = /^([a-z][\w-]+):/i.exec(input);
+  if (ns) return `(${ns[1]})`;
+  const parts = input.replace(/\\/g, '/').split('/');
+  const nm = parts.lastIndexOf('node_modules');
+  if (nm >= 0 && parts[nm + 1]) {
+    const pkg = parts[nm + 1]!;
+    return `node_modules/${pkg.startsWith('@') ? `${pkg}/${parts[nm + 2] ?? ''}` : pkg}`;
+  }
+  const dirs = parts.slice(0, -1).filter((p) => p !== '.');
+  while (dirs[0] === '..') dirs.shift();
+  return dirs.slice(0, 2).join('/') || '.';
+}
+
+/** game.js bytes per source folder from an esbuild metafile (`code` = the written game.js, for the gzip size). */
+export function codeBreakdown(meta: Metafile, code: Buffer): CodeBreakdown {
+  const byFolder = new Map<string, number>();
+  for (const [file, out] of Object.entries(meta.outputs)) {
+    if (file.endsWith('.map')) continue;
+    for (const [input, { bytesInOutput }] of Object.entries(out.inputs)) {
+      const f = sourceFolder(input);
+      byFolder.set(f, (byFolder.get(f) ?? 0) + bytesInOutput);
+    }
+  }
+  const folders = [...byFolder]
+    .filter(([, bytes]) => bytes > 0)
+    .map(([folder, bytes]) => ({ folder, bytes }))
+    .sort((a, b) => b.bytes - a.bytes || a.folder.localeCompare(b.folder));
+  return { bytes: code.length, gzip: gzipSync(code, { level: 9 }).length, folders };
+}
+
+/** Breakdown table: the largest `top` folders, the rest summed up. */
+export function formatBreakdown(b: CodeBreakdown, title: string, top = 14): string {
+  const shown = b.folders.slice(0, top);
+  const rest = b.folders.slice(top);
+  const rows = shown.map((f) => [f.folder, f.bytes]);
+  if (rest.length) rows.push([`(${rest.length} more folders)`, rest.reduce((n, f) => n + f.bytes, 0)]);
+  const glue = b.bytes - b.folders.reduce((n, f) => n + f.bytes, 0);
+  if (glue > 0) rows.push(['(bundle glue)', glue]);
+  const w = Math.max(...rows.map(([f]) => String(f).length));
+  const lines = rows.map(([f, n]) => {
+    const pct = ((Number(n) / b.bytes) * 100).toFixed(1).padStart(5);
+    return `  ${String(f).padEnd(w)}  ${formatBytes(Number(n)).padStart(9)}  ${pct}%`;
+  });
+  return [`${title} by source folder: ${formatBytes(b.bytes)}, gzip ${formatBytes(b.gzip)}`, ...lines].join('\n');
 }
 
 /** Writes a zip of everything in dir (entries at the zip root, deflated, fixed timestamps). */

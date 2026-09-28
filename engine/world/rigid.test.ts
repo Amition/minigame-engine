@@ -280,6 +280,88 @@ describe('RigidWorld behaviour', () => {
     expect(a.dump(200)).toBe(b.dump(200));
   });
 
+  it('finds every overlapping pair whichever axis the broadphase sweeps', () => {
+    const world = new RigidWorld({ substeps: 1 });
+    world.add({ type: 'static', shape: rigidBox(4000, 100), x: 500, y: 1050 });
+    const walls = [
+      world.add({ type: 'static', shape: rigidBox(40, 3000), x: 440, y: -500 }),
+      world.add({ type: 'static', shape: rigidBox(40, 3000), x: 560, y: -500 }),
+    ];
+    const rng = new Rng(4);
+    for (let i = 0; i < 40; i++) {
+      const o = { x: 500 + rng.float(-8, 8), y: 960 - i * 60, angle: rng.float(0, 3) };
+      world.add(i % 2 ? { shape: rigidCircle(rng.float(14, 28)), ...o } : { shape: rigidBox(rng.float(20, 50), rng.float(20, 50)), ...o });
+    }
+    const sweepY = () => (world as unknown as { sweepY: boolean }).sweepY;
+    const key = (a: RigidBody, b: RigidBody) => (a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`);
+    const axes = new Set<boolean>();
+    for (let s = 0; s < 300; s++) {
+      if (s === 60) for (const w of walls) world.remove(w);
+      // With one substep the broadphase runs once, on the AABBs as they are before the step.
+      const expected: string[] = [];
+      const bodies = world.bodies;
+      for (let i = 0; i < bodies.length; i++) {
+        for (let j = i + 1; j < bodies.length; j++) {
+          const a = bodies[i]!;
+          const b = bodies[j]!;
+          if ((a.type !== 'dynamic' || a.sleeping) && (b.type !== 'dynamic' || b.sleeping)) continue;
+          if (a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY) continue;
+          expected.push(key(a, b));
+        }
+      }
+      world.step(H);
+      axes.add(sweepY());
+      const found = world.contacts.map((c) => key(c.a, c.b));
+      expect(new Set(found).size).toBe(found.length);
+      const have = new Set(found);
+      expect(expected.filter((k) => !have.has(k))).toEqual([]);
+    }
+    expect(axes).toEqual(new Set([true, false]));
+  });
+
+  it('replays identically after clear(), whatever sweep axis the previous scene left', () => {
+    const scene = (w: RigidWorld) => {
+      w.add({ type: 'static', shape: rigidBox(700, 40), x: 300, y: -20 });
+      w.add({ type: 'static', shape: rigidBox(700, 40), x: 300, y: 620 });
+      w.add({ type: 'static', shape: rigidBox(40, 700), x: -20, y: 300 });
+      w.add({ type: 'static', shape: rigidBox(40, 700), x: 620, y: 300 });
+      const rng = new Rng(2);
+      for (let i = 0; i < 100; i++) {
+        w.add({ shape: rigidCircle(rng.float(10, 20)), x: 30 + (i % 10) * 60, y: 30 + Math.floor(i / 10) * 60, vx: rng.float(-300, 300), vy: rng.float(-300, 300), restitution: 0.5 });
+      }
+    };
+    const fresh = new RigidWorld({ gravity: 0 });
+    scene(fresh);
+    run(fresh, 2);
+    const reused = new RigidWorld({ gravity: 0 });
+    for (let i = 0; i < 30; i++) reused.add({ shape: rigidCircle(10), x: 0, y: i * 30 });
+    reused.step(H);
+    reused.clear();
+    scene(reused);
+    run(reused, 2);
+    const snap = (w: RigidWorld) => w.bodies.map((o) => `${o.x},${o.y},${o.vx},${o.vy}`).join(';');
+    expect(snap(reused)).toBe(snap(fresh));
+  });
+
+  it('keeps resting contacts in touches while the whole world sleeps', () => {
+    const { world } = ground();
+    const boxes = [0, 1, 2].map((i) => world.add({ shape: rigidBox(40, 40), x: 500, y: 980 - i * 40 }));
+    run(world, 2);
+    expect(boxes.every((b) => b.sleeping)).toBe(true);
+    const key = (a: RigidBody, b: RigidBody) => [a.name || a.id, b.name || b.id].sort().join('-');
+    const pairs = () => world.touches.map((c) => key(c.a, c.b)).sort();
+    const resting = pairs();
+    expect(resting).toHaveLength(3);
+    const where = boxes.map((b) => `${b.x},${b.y},${b.angle}`);
+    let events = 0;
+    world.on('contactBegin', () => events++);
+    world.on('contactEnd', () => events++);
+    run(world, 1);
+    expect(pairs()).toEqual(resting);
+    expect(boxes.map((b) => `${b.x},${b.y},${b.angle}`)).toEqual(where);
+    expect(events).toBe(0);
+  });
+
   it('defers adds and removes made inside contact callbacks', () => {
     const { world, floor } = ground();
     const ball = world.add({ shape: rigidCircle(20), x: 500, y: 900 });

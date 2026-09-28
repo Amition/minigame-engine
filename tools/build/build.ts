@@ -16,8 +16,9 @@
  *
  * Outputs: web → index.html + game.js; wx → + game.json/project.config.json; tt → Douyin's game.js/game.json/
  * project.config.json; tap → game.js/game.json + <out>/tap.zip (upload); 233 → wx build converted by
- * wx_converter.py into <out>/233/game.zip (converter log: <out>/233/convert.log). Fails when the wx/tt package
- * exceeds 4 MB or game.js references node.
+ * wx_converter.py into <out>/233/game.zip (converter log: <out>/233/convert.log; with --minify the converted
+ * game.js is minified again). Fails when the wx/tt package exceeds 4 MB, game.js references node, or (release
+ * builds) the audio manifest misses a sound of <app>/audio/index.ts. Prints the size table plus game.js per folder.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,10 @@ import { defaultApp, exitWithUsage } from '../common/app';
 import { type AppMeta, type BundleTarget, esbuildOptions, findNodeImports, readAppMeta, resolveApp } from './config';
 import { convert233 } from './convert233';
 import {
+  codeBreakdown,
+  type CodeBreakdown,
   copyAssets,
+  formatBreakdown,
   formatBytes,
   packageSize,
   type PackageSize,
@@ -36,6 +40,7 @@ import {
   writeTargetFiles,
   zipDir,
 } from './files';
+import { checkAudioLibrary, stubAudioLibrary } from './release';
 
 export type Target = BundleTarget | '233';
 export const TARGETS: readonly Target[] = ['web', 'wx', 'tt', 'tap', '233'];
@@ -58,6 +63,8 @@ export interface BuildResult {
   /** 233 without a converter. */
   skipped?: boolean;
   size?: PackageSize;
+  /** game.js bytes per source folder (233: of the wx bundle it converts). */
+  breakdown?: CodeBreakdown;
   /** Size limit that applies to `size.total`. */
   limit?: number;
   /** Upload archive (tap.zip, 233 game.zip). */
@@ -84,25 +91,42 @@ async function formatErrors(e: unknown): Promise<string> {
   return e instanceof Error ? (e.stack ?? e.message) : String(e);
 }
 
-/** Bundles <app>/main.ts for a target into <outDir>/game.js. Returns esbuild warnings and portability problems. */
+/**
+ * Bundles <app>/main.ts for a target into <outDir>/game.js. Release builds (not dev) first check the audio manifest
+ * against <app>/audio/index.ts and replace that library with an empty one for main.ts (see release.ts).
+ * Returns esbuild warnings, portability / manifest problems and the per-folder size breakdown.
+ */
 export async function bundle(
   target: BundleTarget,
   appDir: string,
   outDir: string,
   o: { dev: boolean; minify: boolean; meta?: AppMeta },
-): Promise<{ warnings: string[]; problems: string[] }> {
+): Promise<{ warnings: string[]; problems: string[]; breakdown?: CodeBreakdown }> {
   const meta = o.meta ?? readAppMeta(appDir);
+  const warnings: string[] = [];
+  const plugins: esbuild.Plugin[] = [];
+  if (!o.dev) {
+    const audio = await checkAudioLibrary(appDir);
+    if (audio.problems.length) return { warnings, problems: audio.problems };
+    if (audio.stubbable) plugins.push(stubAudioLibrary(appDir));
+    else if (audio.file) warnings.push(`${relative(process.cwd(), audio.file)} exports more than sfx/music, so it stays in the release bundle`);
+  }
   mkdirSync(outDir, { recursive: true });
   const outfile = join(outDir, 'game.js');
-  let res: esbuild.BuildResult;
+  let res: esbuild.BuildResult<{ metafile: true }>;
   try {
-    res = await esbuild.build({ ...esbuildOptions(target, appDir, meta, { dev: o.dev, minify: o.minify, outfile }), write: true });
+    res = await esbuild.build({
+      ...esbuildOptions(target, appDir, meta, { dev: o.dev, minify: o.minify, outfile, plugins }),
+      write: true,
+      metafile: true,
+    });
   } catch (e) {
-    return { warnings: [], problems: [`esbuild failed:\n${await formatErrors(e)}`] };
+    return { warnings, problems: [`esbuild failed:\n${await formatErrors(e)}`] };
   }
-  const warnings = (await esbuild.formatMessages(res.warnings, { kind: 'warning', color: false })).map((s) => s.trim());
-  const problems = findNodeImports(readFileSync(outfile, 'utf8')).map((p) => `game.js is not portable: ${p}`);
-  return { warnings, problems };
+  warnings.push(...(await esbuild.formatMessages(res.warnings, { kind: 'warning', color: false })).map((s) => s.trim()));
+  const code = readFileSync(outfile);
+  const problems = findNodeImports(code.toString('utf8')).map((p) => `game.js is not portable: ${p}`);
+  return { warnings, problems, breakdown: codeBreakdown(res.metafile, code) };
 }
 
 /** Builds one target. Never throws for build errors: check `ok` / `problems`. */
@@ -121,14 +145,27 @@ export async function buildTarget(target: Target, opts: BuildOptions = {}): Prom
       log(`[build] 233 -> ${relative(process.cwd(), dir) || dir} (wx build + converter)`);
       const wx = await buildTarget('wx', { ...opts, app: appDir, out: tmp, log: () => {} });
       if (!wx.ok) return { ...wx, target, dir };
-      const c = convert233(wx.dir, dir, log);
-      const base = { target, dir, warnings: wx.warnings, ...(wx.size ? { size: wx.size } : {}) };
+      const c = convert233(wx.dir, dir, log, { minify });
+      const base = {
+        target,
+        dir,
+        warnings: [...wx.warnings, ...(c.warnings ?? [])],
+        ...(wx.size ? { size: wx.size } : {}),
+        ...(wx.breakdown ? { breakdown: wx.breakdown } : {}),
+      };
       if (c.skipped) {
         log(`[233] skipped: ${c.message}`);
         return { ...base, ok: true, skipped: true, problems: [] };
       }
       if (!c.ok) return { ...base, ok: false, problems: [c.message ?? 'conversion failed'] };
-      return { ...base, ok: true, problems: [], ...(c.zip ? { zip: c.zip } : {}), ...(c.zipBytes ? { zipBytes: c.zipBytes } : {}) };
+      return {
+        ...base,
+        ok: true,
+        problems: [],
+        size: packageSize(join(dir, 'game')),
+        ...(c.zip ? { zip: c.zip } : {}),
+        ...(c.zipBytes ? { zipBytes: c.zipBytes } : {}),
+      };
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -137,8 +174,8 @@ export async function buildTarget(target: Target, opts: BuildOptions = {}): Prom
   const dir = join(out, target);
   log(`[build] ${target} -> ${relative(process.cwd(), dir) || dir}${dev ? ' (dev)' : ''}${minify ? ' (minify)' : ''}`);
   rmSync(dir, { recursive: true, force: true });
-  const { warnings, problems } = await bundle(target, appDir, dir, { dev, minify, meta });
-  const r: BuildResult = { target, dir, ok: false, problems, warnings };
+  const { warnings, problems, breakdown } = await bundle(target, appDir, dir, { dev, minify, meta });
+  const r: BuildResult = { target, dir, ok: false, problems, warnings, ...(breakdown ? { breakdown } : {}) };
   if (problems.length) return r;
   writeTargetFiles(target, dir, meta);
   copyAssets(appDir, dir);
@@ -196,6 +233,9 @@ export function formatReport(results: BuildResult[]): string {
   }
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map((row) => row[i]!.length)));
   const lines = rows.map((row) => row.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd());
+  // Targets bundle the same app code (a few hundred bytes of platform adapter differ): one breakdown is enough.
+  const first = results.find((r) => r.breakdown && r.ok);
+  if (first?.breakdown) lines.push('', formatBreakdown(first.breakdown, `${first.target === '233' ? 'wx' : first.target} game.js`));
   for (const r of results) {
     for (const w of r.warnings) lines.push(`warning [${r.target}] ${w}`);
     for (const p of r.problems) lines.push(`error [${r.target}] ${p}`);

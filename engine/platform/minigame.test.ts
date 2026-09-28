@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createMiniGamePlatform,
   encodeWav,
+  MiniGameStorage,
   normalizeBase,
   rewardWatched,
   safeAreaInsets,
@@ -391,6 +392,43 @@ describe('storage', () => {
     expect(() => full.platform.storage.set('a', 'x')).not.toThrow();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('exceed storage max size'));
   });
+
+  it('reads the key list once and keeps it in step with set and remove', () => {
+    const { platform, store, api } = setup();
+    store.set('old', '');
+    const info = api.getStorageInfoSync!;
+    let infoCalls = 0;
+    api.getStorageInfoSync = () => (infoCalls++, info());
+    const s = platform.storage as MiniGameStorage;
+    expect(s.get('old')).toBe('');
+    for (let i = 0; i < 5; i++) expect(s.get(`missing${i}`)).toBeNull();
+    s.set('empty', '');
+    expect(s.get('empty')).toBe('');
+    expect(s.keys().sort()).toEqual(['empty', 'old']);
+    s.remove('empty');
+    expect(s.get('empty')).toBeNull();
+    expect(infoCalls).toBe(1);
+    store.set('external', '');
+    expect(s.get('external')).toBeNull();
+    s.refresh();
+    expect(s.get('external')).toBe('');
+    expect(infoCalls).toBe(2);
+  });
+
+  it('re-reads the key list after a failed write', () => {
+    const { platform, api, store } = setup();
+    const s = platform.storage as MiniGameStorage;
+    expect(s.keys()).toEqual([]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const write = api.setStorageSync!;
+    api.setStorageSync = (key, data) => {
+      write(key, data);
+      throw { errMsg: 'setStorageSync:fail timeout' };
+    };
+    s.set('maybe', '');
+    expect(store.has('maybe')).toBe(true);
+    expect(s.get('maybe')).toBe('');
+  });
 });
 
 describe('audio', () => {
@@ -463,6 +501,42 @@ describe('audio', () => {
     expect(audios.map((a) => a.opts)).toEqual([sfx, undefined, undefined, sfx]);
   });
 
+  it('picks the context kind from the stream hint and never loops a decoded sfx context', async () => {
+    const { platform, audios, files } = setup({ sfxAudioOptions: { useWebAudioImplement: true }, longAudioBytes: 100 });
+    files.set('assets/big.mp3', 'x'.repeat(500));
+    await platform.audio.load('big', 'big.mp3', { stream: false });
+    await platform.audio.load('theme', 'small.mp3', { stream: true });
+    const sfx = { useWebAudioImplement: true };
+    expect(audios.map((a) => a.opts)).toEqual([sfx, undefined]);
+
+    const loop = platform.audio.play('big', { loop: true });
+    expect(audios).toHaveLength(3);
+    expect(audios[2]!.opts).toBeUndefined();
+    expect(audios[0]!.log).toEqual([]);
+    loop.stop();
+    platform.audio.play('big');
+    expect(audios[0]!.log).toEqual(['play']);
+    platform.audio.play('big', { loop: true });
+    expect(audios[2]!.log).toEqual(['play', 'stop', 'play']);
+    expect(audios).toHaveLength(3);
+  });
+
+  it('unload destroys the contexts of a key and a later load starts over', async () => {
+    const { platform, audios } = setup();
+    await platform.audio.load('theme', 'theme.mp3', { stream: true });
+    const m = platform.audio.play('theme', { loop: true });
+    platform.audio.unload('theme');
+    expect(audios[0]!.destroyed).toBe(true);
+    expect(m.playing).toBe(false);
+    expect(platform.audio.isLoaded('theme')).toBe(false);
+    expect(platform.audio.voiceCount('theme')).toBe(0);
+    m.stop();
+    expect(audios[0]!.log).toEqual(['play']);
+    await platform.audio.load('theme', 'theme.mp3', { stream: true });
+    expect(audios).toHaveLength(2);
+    expect(platform.audio.play('theme').playing).toBe(true);
+  });
+
   it('writes loadPcm sounds as WAV files into USER_DATA_PATH', async () => {
     const { platform, files, audios } = setup();
     expect(platform.audio.loadPcm).toBeTypeOf('function');
@@ -483,6 +557,45 @@ describe('audio', () => {
     platform.audio.play('nope');
     expect(inst.playing).toBe(false);
     expect(warn.mock.calls.filter((c) => String(c[0]).includes('"nope"'))).toHaveLength(1);
+  });
+});
+
+describe('memory and frame rate', () => {
+  it('forwards memory warnings, triggerGC, the preferred frame rate and innerAudioOption', () => {
+    let warn: ((res?: { level?: number }) => void) | undefined;
+    const gc = vi.fn();
+    const fps = vi.fn();
+    const audioOption = vi.fn();
+    const { platform } = setup(
+      { innerAudioOption: { obeyMuteSwitch: false } },
+      { onMemoryWarning: (cb) => (warn = cb), triggerGC: gc, setPreferredFramesPerSecond: fps, setInnerAudioOption: audioOption },
+    );
+    expect(audioOption).toHaveBeenCalledOnce();
+    expect(audioOption.mock.calls[0]![0]).toMatchObject({ obeyMuteSwitch: false });
+    const infos: unknown[] = [];
+    const off = platform.onMemoryWarning!((i) => infos.push(i));
+    warn!({ level: 10 });
+    warn!();
+    off();
+    warn!({ level: 15 });
+    expect(infos).toEqual([{ level: 10 }, {}]);
+    platform.triggerGC();
+    expect(gc).toHaveBeenCalledOnce();
+    expect(platform.setPreferredFramesPerSecond(29.6)).toBe(true);
+    platform.setPreferredFramesPerSecond(0);
+    platform.setPreferredFramesPerSecond(240);
+    expect(fps.mock.calls.map((c) => c[0])).toEqual([30, 1, 60]);
+  });
+
+  it('degrades when the runtime lacks the APIs', () => {
+    const audioOption = vi.fn();
+    const { platform } = setup({}, { setInnerAudioOption: audioOption });
+    expect(audioOption).not.toHaveBeenCalled();
+    expect(platform.onMemoryWarning).toBeUndefined();
+    expect(() => platform.triggerGC()).not.toThrow();
+    expect(platform.setPreferredFramesPerSecond(30)).toBe(false);
+    const throwing = setup({}, { setPreferredFramesPerSecond: () => { throw new Error('not supported'); } });
+    expect(throwing.platform.setPreferredFramesPerSecond(30)).toBe(false);
   });
 });
 

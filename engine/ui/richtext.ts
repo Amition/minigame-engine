@@ -334,6 +334,8 @@ export class RichText extends UIView {
       }
       y += h;
     }
+    if (sh) ctx.shadowBlur = ctx.shadowOffsetX = ctx.shadowOffsetY = 0;
+    if (st) ctx.lineJoin = 'miter';
   }
 
   override describe() {

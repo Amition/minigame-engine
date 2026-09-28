@@ -7,7 +7,8 @@ description: Packages and ships a game from this repo to the web and to mini-gam
 
 One codebase, five targets. The build bundles `<app>/main.ts` (default export `AppDef`) with esbuild into a
 single ES2017 IIFE `game.js`, writes the target's config files, copies `<app>/assets/**` (dotfiles skipped) and
-prints a size table. Source: `tools/build/` (`build.ts`, `config.ts`, `files.ts`, `convert233.ts`).
+prints a size table plus `game.js` per source folder. Source: `tools/build/` (`build.ts`, `config.ts`,
+`files.ts`, `release.ts`, `convert233.ts`).
 
 ## Commands
 
@@ -18,8 +19,9 @@ pnpm build --target "wx,tt" --app game --minify                    # comma lists
 pnpm build --target web --app game --out out --dev                 # dev build: sourcemap, window.__engine, error overlay
 ```
 
-Always pass `--app game` (the CLI default is `sandbox`). The command exits 1 when any target fails, or when the
-only requested target was skipped (233 without converter). Never ship `--dev` builds.
+Pass `--app` explicitly (the default is package.json `engine.app`, currently `game`; without it, `sandbox`). The
+command exits 1 when any target fails, or when the only requested target was skipped (233 without converter).
+Never ship `--dev` builds.
 
 | Target | Output | Upload / open |
 |---|---|---|
@@ -29,22 +31,54 @@ only requested target was skipped (233 without converter). Never ship `--dev` bu
 | `tap` | `game.js`, `game.json`, `assets/` + `dist/tap.zip` | upload `dist/tap.zip` |
 | `233` | wx build converted: `dist/233/game.zip` | upload to the 233 minihost console |
 
-Real output for the Suika game (`pnpm build --target all --app game --minify`, `dir` column omitted):
+Real output for the Suika game (`pnpm build --target all --app game --minify`, `dir` column omitted; the 233
+row counts the converted package: its ES5 `game.js` plus the converter runtime):
 
 ```
-target  game.js   assets         package   limit    upload                 status
-web     236.2 KB  489.0 KB (12)  726.1 KB  -        -                      ok
-wx      237.8 KB  489.0 KB (12)  727.6 KB  4.00 MB  -                      ok
-tt      237.7 KB  489.0 KB (12)  727.0 KB  4.00 MB  -                      ok
-tap     238.0 KB  489.0 KB (12)  727.1 KB  4.00 MB  dist/tap.zip 554.5 KB  ok
-233     237.8 KB  489.0 KB (12)  727.6 KB  -        dist/233/game.zip 594.4 KB  ok
+target  game.js   assets         package   limit    upload                      status
+web     260.3 KB  489.0 KB (12)  750.2 KB  -        -                           ok
+wx      263.6 KB  489.0 KB (12)  753.4 KB  4.00 MB  -                           ok
+tt      263.5 KB  489.0 KB (12)  752.8 KB  4.00 MB  -                           ok
+tap     263.8 KB  489.0 KB (12)  752.9 KB  4.00 MB  dist/tap.zip 561.4 KB       ok
+233     337.0 KB  489.0 KB (12)  827.0 KB  -        dist/233/game.zip 575.3 KB  ok
+
+web game.js by source folder: 260.3 KB, gzip 89.9 KB
+  engine/ui           73.3 KB   28.2%
+  engine/world        48.8 KB   18.7%
+  game/art            20.0 KB    7.7%
+  ...
 ```
+
+Archer (`--app archer`): web 294.6 KB, wx 298.0 KB game.js, 233 `game.js` 377.5 KB (zip 722.0 KB). The folder
+breakdown (esbuild metafile: bytes each source folder contributes to the output) is printed once per run; check it
+when `game.js` grows. `(release-stub)` is the empty sound library, `(bundle glue)` esbuild's wrapper and helpers.
 
 Limits: wx and tt fail above 4 MB (code + assets, source maps excluded; Douyin itself allows 20 MB without
 subpackages, the build keeps both at 4 MB). tap warns above 4 MB (hard cap 60 MB). There are no subpackages.
-Other failures: esbuild errors, and `game.js is not portable` (a `node:` import, `require(...)` or `@napi-rs`
-reached the bundle: engine/game code imported `@engine/testing` or a Node module). A warning lists asset file
-types uploads reject (for example `.webp`; use `.png`/`.jpg`, `.mp3`, `.json`).
+Other failures: esbuild errors, `game.js is not portable` (a `node:` import, `require(...)` or `@napi-rs`
+reached the bundle: engine/game code imported `@engine/testing` or a Node module), and (release builds) an audio
+manifest that misses a sound of `<app>/audio/index.ts` (`run "pnpm audio --app <app>"`). A warning lists asset
+file types uploads reject (for example `.webp`; use `.png`/`.jpg`, `.mp3`, `.json`).
+
+## What release builds drop
+
+Release builds (everything but `--dev`) define `process.env.NODE_ENV` as `'production'`, and esbuild removes code
+behind an inline `if (process.env.NODE_ENV !== 'production') { ... }` (an early `return` does not work):
+
+- the AudioManager's synth fallback (`renderSfx` / `renderSong`, the song parser, instruments, DSP) and the
+  platforms' `loadPcm` (WAV writing / PCM decode);
+- the sound library imported by `<app>/main.ts`: `tools/build/release.ts` hands `main.ts` an empty
+  `export const sfx = {}; export const music = {};` (only when `audio/index.ts` exports nothing but `sfx` / `music`;
+  other importers such as the sandbox audio lab keep the real module). First it imports the library (the build runs
+  under tsx) and fails when `assets/audio/manifest.json` lacks a name, has the wrong kind or a missing file;
+- `AppDef.devScenes` (galleries, previews), written as
+  `devScenes: process.env.NODE_ENV === 'production' ? undefined : { gallery: () => new GalleryScene() }`; `bootApp`
+  registers them in dev, tests and `pnpm shot` only;
+- the debug overlay when unused (`debugDraw` is `/* @__PURE__ */`).
+
+Keep dev-only code in that shape; a `const isDev = ...` variable or a helper function defeats the removal. Verify
+with an unminified release build: `class GalleryScene` / `function renderSong` must be absent (their call sites stay
+as text inside `if (false)` until `--minify` deletes them).
 
 ## app.json
 
@@ -60,7 +94,8 @@ types uploads reject (for example `.webp`; use `.png`/`.jpg`, `.mp3`, `.json`).
     "tt": { "rewarded": "", "interstitial": "" },
     "tap": { "rewarded": "", "interstitial": "" }
   },
-  "share": { "title": "合成大西瓜，你能合出几个？", "imageUrl": "", "query": "" }
+  "share": { "title": "合成大西瓜，你能合出几个？", "imageUrl": "", "query": "" },
+  "innerAudioOption": { "obeyMuteSwitch": false }
 }
 ```
 
@@ -68,6 +103,9 @@ types uploads reject (for example `.webp`; use `.png`/`.jpg`, `.mp3`, `.json`).
 - `appid.*` goes into `project.config.json`; empty ids become `touristappid` (wx) / `testAppId` (tt), which run
   in the devtools but cannot upload or show real ads.
 - `share` is the passive share-menu content on mini-games (passed to the platform factory at build time).
+- `innerAudioOption` (optional) is passed to `setInnerAudioOption` at startup on mini-games: `obeyMuteSwitch: false`
+  plays through the iPhone mute switch, `mixWithOther: false` pauses other apps' audio. Omit it to keep the host
+  defaults (unverified on devices: which keys each host honours).
 - `ads` is read by game code. Pattern from `game/scenes/play.ts`:
 
 ```ts
@@ -90,9 +128,13 @@ On mini-games hide ad buttons when the unit id is empty.
 ## 233 converter
 
 `pnpm build --target 233` builds wx, then runs the Tuanjie/Unity minihost `wx_converter.py` (Python 3) which
-transpiles to ES5 with babel, prepends its runtime and zips `dist/233/game.zip`. Setup once: clone the converter
-into `%TEMP%\minihost-converter` (or set `MINIHOST_CONVERTER=<dir with wx_converter.py>`); its `npm install`
-runs automatically. Without it the target is skipped with these instructions.
+transpiles to ES5 with babel, prepends its runtime and zips `dist/233/game.zip`. Babel un-minifies the bundle
+(Suika: 264 KB wx → 598 KB), so with `--minify` the build minifies `dist/233/game/game.js` again with esbuild
+(ES5 target, so no newer syntax sneaks in: 598 → 336 KB), checks that it parses and re-zips; if esbuild fails the
+converter output ships unminified with a warning. Setup once: clone the converter into `%TEMP%\minihost-converter`
+(or set `MINIHOST_CONVERTER=<dir with wx_converter.py>`); its `npm install` runs automatically. Without it the
+target is skipped with these instructions. The re-minified bundle is only proven by parsing and the headless
+suite; smoke-test it in the 233 host (unverified on devices).
 
 ## Platform differences (encoded in `engine/platform/{wx,tt,tap,minigame}.ts`)
 
@@ -107,6 +149,17 @@ runs automatically. Without it the target is skipped with these instructions.
 
 Game code never touches `wx`/`tt`/`tap`/`window`: use `platform()` (`ads.rewarded/interstitial`, `vibrate`,
 `share`, `login`, `storage`). Fonts on mini-games default to `sans-serif`.
+
+Frame rate, memory and storage (all platforms go through the Game; unverified on real devices):
+
+- `game.setFrameRate(30)` (or `frameRate` in the AppDef / GameConfig) caps the loop, 1-60. Mini-games call the
+  host's `setPreferredFramesPerSecond`; web (and runtimes without it) skip `requestAnimationFrame` frames. `dt`
+  stays real time. Use 30 on menus, pause and result screens, 20 for a static title; restore 60 for gameplay.
+- Mini-games forward `onMemoryWarning` to `game.memoryWarning()`: it clears the tint cache, emits
+  `'memorywarning'` (free what the game can rebuild: `releaseTexture`, `TileMap.releaseChunks`, cached
+  containers) and calls `triggerGC` (wx/tt/tap when present; web has neither).
+- Storage reads `getStorageInfoSync().keys` once per launch and keeps the list in step with set/remove
+  (`MiniGameStorage.refresh()` after writing storage outside the platform).
 
 ## Testing ladder
 
@@ -128,7 +181,7 @@ and memory on low-end Android, font and CJK rendering, storage persistence acros
 - [ ] `pnpm audio --app game` rendered; manifest and MP3s committed; no verdict issues.
 - [ ] `app.json`: name, bumped `version`, orientation, background, real app ids, ad unit ids, share title/image.
 - [ ] `pnpm build --target all --app game --minify`: every row `ok`, no warnings, packages well under 4 MB.
-- [ ] No `--dev` build, no debug scenes reachable from menus (gallery/test scenes only via `?scene=`).
+- [ ] No `--dev` build; review scenes (galleries, previews) live in `devScenes`, so release builds lack them.
 - [ ] WeChat: `dist/wx` runs in WeChat DevTools with the real appid; rewarded/interstitial units tested on a
       phone; share menu shows the right title; upload from the devtools.
 - [ ] Douyin: `dist/tt` in Douyin DevTools with the real appid; no interstitial in the first 30 s or within 60 s
@@ -144,5 +197,8 @@ and memory on low-end Android, font and CJK rendering, storage persistence acros
 - Assets must live in `<app>/assets`; files starting with `.` (like `.render-cache.json`) are never copied.
 - Big PNG backgrounds and long music loops are what blow the 4 MB budget: prefer code art (`code-art` skill)
   and lower song `kbps` (`audio-design` skill).
+- A release build failing with `missing ... sound(s)`: a sound was added to `audio/index.ts` without re-rendering;
+  run `pnpm audio --app <app>` and commit the manifest and MP3s.
+- Registering a gallery in `scenes` (or a `devScenes` object without the `NODE_ENV` ternary) ships it and its art.
 - `project.config.json` sets `es6: false` and no devtools minify: `game.js` is already ES2017 (minified with
   `--minify`); do not turn devtools transpiling on.

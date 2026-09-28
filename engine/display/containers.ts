@@ -1,6 +1,6 @@
 import type { Color } from '../core/color';
 import { Game } from '../core/game';
-import { TAU } from '../core/math';
+import { Mat2D, TAU } from '../core/math';
 import { roundRectPath } from '../gfx/draw';
 import { Texture } from '../gfx/texture';
 import type { Ctx2D, Surface } from '../gfx/types';
@@ -35,7 +35,6 @@ export class MaskContainer extends Node {
   mask: MaskShape;
   outline: { color: Color; width: number } | null = null;
   maskHits = true;
-  private suppressed = false;
   private polyCache: { src: GraphicsPoints; flat: number[] } | null = null;
 
   constructor(mask: MaskShape, opts: MaskContainerOptions = {}) {
@@ -107,18 +106,11 @@ export class MaskContainer extends Node {
   }
 
   override hitTest(lx: number, ly: number): boolean {
-    const inside = this.containsPoint(lx, ly);
-    if (this.maskHits) {
-      // The game's hit test calls hitTest() right before descending into children, so this gates child hits.
-      if (!inside && this.interactiveChildren) {
-        this.interactiveChildren = false;
-        this.suppressed = true;
-      } else if (inside && this.suppressed) {
-        this.interactiveChildren = true;
-        this.suppressed = false;
-      }
-    }
-    return inside;
+    return this.containsPoint(lx, ly);
+  }
+
+  override hitClip(lx: number, ly: number): boolean {
+    return (!this.maskHits || this.containsPoint(lx, ly)) && super.hitClip(lx, ly);
   }
 
   /** Adds the mask outline to the current path. */
@@ -161,14 +153,14 @@ export class MaskContainer extends Node {
   }
 
   protected override renderContent(ctx: Ctx2D): void {
-    ctx.save();
+    this.saveRenderState(ctx);
     ctx.beginPath();
     this.maskPath(ctx);
     ctx.clip();
-    this.draw(ctx);
+    this.renderDraw(ctx);
     this.renderChildren(ctx);
-    ctx.restore();
-    this.drawOver(ctx);
+    this.restoreRenderState(ctx);
+    this.renderDrawOver(ctx);
   }
 
   override drawOver(ctx: Ctx2D): void {
@@ -209,6 +201,7 @@ export class CacheContainer extends Node {
   private surface: Surface | null = null;
   private dirty = true;
   private _redraws = 0;
+  private readonly cacheMat = new Mat2D();
 
   constructor(width: number, height: number, opts: CacheContainerOptions = {}) {
     super();
@@ -237,15 +230,19 @@ export class CacheContainer extends Node {
     return this;
   }
 
-  /** The cached content as a texture (renders now if needed). Shares the backing canvas: it changes on redraw. */
+  /**
+   * The cached content as a texture (renders now if needed). Shares the backing canvas: it changes on redraw and
+   * becomes an empty 1x1 image after releaseCache() / destroy().
+   */
   cacheTexture(): Texture | null {
     if (!this.refresh()) return null;
     const s = this.surface!;
     return new Texture(s, { x: 0, y: 0, w: s.width, h: s.height });
   }
 
-  /** Drops the offscreen canvas; the next render rebuilds it. */
+  /** Drops the offscreen canvas (shrunk to 1x1 so its pixels are freed at once); the next render rebuilds it. */
   releaseCache(): void {
+    releaseSurface(this.surface);
     this.surface = null;
     this.dirty = true;
   }
@@ -257,6 +254,7 @@ export class CacheContainer extends Node {
   }
 
   protected override onDestroy(): void {
+    releaseSurface(this.surface);
     this.surface = null;
   }
 
@@ -282,13 +280,17 @@ export class CacheContainer extends Node {
     c.globalCompositeOperation = 'source-over';
     c.clearRect(0, 0, pw, ph);
     c.save();
-    c.scale(pw / this.width, ph / this.height);
-    this.draw(c);
-    this.renderChildren(c);
-    this.drawOver(c);
+    this.renderContentTo(c, this.cacheMat.set(pw / this.width, 0, 0, ph / this.height, 0, 0));
     c.restore();
     this.dirty = false;
     this._redraws++;
     return true;
   }
+}
+
+/** Mini-game canvases are slow to be garbage-collected: shrinking frees the backing pixels right away. */
+function releaseSurface(s: Surface | null): void {
+  if (!s) return;
+  s.width = 1;
+  s.height = 1;
 }

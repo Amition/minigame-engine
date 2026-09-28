@@ -135,12 +135,17 @@ describe('tintTexture', () => {
     expect(tintTexture(key, '#ff0000')).not.toBe(b);
   });
 
-  it('keeps only the newest variants per source', async () => {
+  it('keeps only the newest variants per source and releases the canvas of an evicted one', async () => {
     await pixelGame();
     const src = strips();
     const first = tintTexture(src, '#010000');
-    for (let i = 2; i <= 17; i++) tintTexture(src, `#${i.toString(16).padStart(2, '0')}0000`);
+    const second = tintTexture(src, '#020000');
+    expect((first.source as Surface).width).toBe(50);
+    for (let i = 3; i <= 17; i++) tintTexture(src, `#${i.toString(16).padStart(2, '0')}0000`);
+    expect([(first.source as Surface).width, (first.source as Surface).height]).toEqual([1, 1]);
+    expect((second.source as Surface).width).toBe(50);
     expect(tintTexture(src, '#010000')).not.toBe(first);
+    expect((src.source as Surface).width).toBe(50);
   });
 
   it("bakes at the source's resolution by default and names textureStats entries", async () => {

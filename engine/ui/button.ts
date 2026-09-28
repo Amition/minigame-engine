@@ -1,4 +1,4 @@
-import { darken, lighten, luminance, mix } from '../core/color';
+import { luminance } from '../core/color';
 import { Game } from '../core/game';
 import { roundRectPath } from '../gfx/draw';
 import type { Ctx2D } from '../gfx/types';
@@ -9,6 +9,7 @@ import { uiEvents } from './events';
 import { uiIconName, UIIcon, type UIIconSource } from './icon';
 import { Label } from './label';
 import type { UISpacing } from './layout';
+import { UIGradientCache, uiMix, uiShade } from './paint';
 import { uiColor, uiRadius, type UIColor, type UIColorToken, type UIRadius } from './theme';
 import { UIView, type UINodeProps } from './view';
 
@@ -102,6 +103,7 @@ export class Button extends UIView {
   protected minHit: number;
   private _disabled: boolean;
   private baseScale = 1;
+  private readonly faceGradient = new UIGradientCache();
 
   constructor(props: ButtonProps = {}, kind = 'Button') {
     const sz = SIZES[props.size ?? 'md'];
@@ -237,7 +239,7 @@ export class Button extends UIView {
     const token = this.color ?? FACE[this.variant];
     if (!token) return null;
     const base = uiColor(token);
-    return this._disabled ? mix(base, uiColor('surfaceAlt'), 0.7) : base;
+    return this._disabled ? uiMix(base, uiColor('surfaceAlt'), 0.7) : base;
   }
 
   setPressed(p: boolean): void {
@@ -273,14 +275,11 @@ export class Button extends UIView {
       const fh = h - e;
       ctx.beginPath();
       roundRectPath(ctx, 0, e, w, fh, r);
-      ctx.fillStyle = darken(base, 0.18);
+      ctx.fillStyle = uiShade(base, -0.18);
       ctx.fill();
       ctx.beginPath();
       roundRectPath(ctx, 0, d, w, fh, r);
-      const g = ctx.createLinearGradient(0, d, 0, d + fh);
-      g.addColorStop(0, lighten(base, 0.09));
-      g.addColorStop(1, base);
-      ctx.fillStyle = g;
+      ctx.fillStyle = this.faceGradient.get2(ctx, 0, d, 0, d + fh, uiShade(base, 0.09), base);
       ctx.fill();
       const inset = Math.min(8, fh * 0.1);
       const rr = typeof r === 'number' ? Math.max(0, r - inset) : r;
@@ -304,10 +303,7 @@ export class Button extends UIView {
       super.renderChildren(ctx);
       return;
     }
-    ctx.save();
-    ctx.translate(0, this.pressDepth);
-    super.renderChildren(ctx);
-    ctx.restore();
+    this.renderChildrenOffset(ctx, 0, this.pressDepth);
   }
 
   override describe() {

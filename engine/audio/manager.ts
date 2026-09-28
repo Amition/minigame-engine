@@ -33,8 +33,18 @@ export interface AudioManifest {
 export type AudioChannel = 'master' | 'music' | 'sfx';
 
 export interface AudioManagerOptions {
-  /** Definitions used to synthesize sounds missing from the manifest (dev fallback, needs backend.loadPcm). */
+  /**
+   * Definitions used to synthesize sounds missing from the manifest: a dev fallback (needs backend.loadPcm). Release
+   * builds compile synthesis out and replace the library imported by `<app>/main.ts` with an empty one.
+   */
   library?: AudioLibrary;
+  /** Load every sfx once the manifest is read, so the first play is not dropped (default true). */
+  preloadSfx?: boolean;
+  /**
+   * A music track is unloaded (decoder / InnerAudioContext freed) this many ms after it stopped or faded out, unless
+   * it plays again first (default 4000; Infinity keeps tracks loaded). Needs backend.unload.
+   */
+  musicUnloadMs?: number;
   /** Manifest path under the assets dir (default 'audio/manifest.json'). */
   manifestPath?: string;
   /** Storage key for volumes and mutes (default 'audio.settings'). */
@@ -114,8 +124,8 @@ interface Synthesized {
 }
 
 /**
- * Fallback synthesis per definition object and sample rate. Rendering is deterministic (seeded), so managers share it:
- * tests create a manager per test game and would otherwise re-render every song for seconds each time.
+ * Fallback synthesis per library definition (object or factory) and sample rate. Rendering is deterministic (seeded),
+ * so managers share it: tests create a manager per test game and would otherwise re-render every sound each time.
  */
 const synthCache = new WeakMap<object, Map<number, Synthesized>>();
 
@@ -128,11 +138,11 @@ function synthesizeOnce(def: object, sampleRate: number, render: () => Synthesiz
 }
 
 /**
- * Game audio on top of the platform AudioBackend: manifest loading, sfx with cooldowns and voice limits, looping
- * music with cross-fades, master/music/sfx volumes and mutes (persisted), hide/show handling and a synth fallback.
+ * Game audio on top of the platform AudioBackend: manifest loading (music streamed, sfx preloaded), sfx with
+ * cooldowns and voice limits, looping music with cross-fades (stopped tracks are unloaded after musicUnloadMs),
+ * master/music/sfx volumes and mutes (persisted), hide/show handling and a dev-only synth fallback.
  *
  *     const audio = createAudioManager(game, { library });   // library = import from '<app>/audio'
- *     await audio.preload();
  *     audio.playSfx('coin', { pitchJitter: 1 });
  *     audio.playMusic('menu', { fadeMs: 600 });
  */
@@ -141,8 +151,11 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
   readonly ready: Promise<void>;
   private manifest: AudioManifest | null = null;
   private readonly library: AudioLibrary;
-  private readonly opts: Required<Omit<AudioManagerOptions, 'library' | 'seed'>>;
+  private readonly opts: Required<Omit<AudioManagerOptions, 'library' | 'seed' | 'preloadSfx'>>;
   private readonly rng: Rng;
+  /** Ms of update() time (fades and delayed unloads run on it). */
+  private clock = 0;
+  private readonly unloadAt = new Map<string, number>();
   private readonly infos = new Map<string, SoundInfo>();
   private readonly loading = new Map<string, Promise<boolean>>();
   private readonly lastPlay = new Map<string, number>();
@@ -172,6 +185,7 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
       maxVoices: opts.maxVoices ?? 4,
       cooldownMs: opts.cooldownMs ?? 40,
       musicFadeMs: opts.musicFadeMs ?? 800,
+      musicUnloadMs: opts.musicUnloadMs ?? 4000,
       fallbackMusicRate: opts.fallbackMusicRate ?? 22050,
     };
     this.rng = new Rng(opts.seed ?? 0xa0d10);
@@ -183,6 +197,9 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
       game.on('prerender', () => this.tick()),
     );
     managers.set(game, this);
+    if (opts.preloadSfx !== false) {
+      void this.ready.then(() => (this.destroyed ? undefined : this.preload(this.names('sfx')))).catch(() => {});
+    }
   }
 
   private get backend() {
@@ -228,8 +245,12 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
     return this.infos.has(name) && this.backend.isLoaded(name);
   }
 
-  /** Loads one sound: the manifest file if listed, else synthesizes it from the library. Resolves false if unavailable. */
+  /**
+   * Loads one sound: the manifest file if listed (music with the backend's `stream` hint), else (dev builds) synthesizes
+   * it from the library. Resolves false if unavailable.
+   */
   load(name: string): Promise<boolean> {
+    this.unloadAt.delete(name);
     if (this.isLoaded(name)) return Promise.resolve(true);
     let p = this.loading.get(name);
     if (p) return p;
@@ -238,7 +259,7 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
       const e = this.manifest?.sounds[name];
       if (e) {
         try {
-          await this.backend.load(name, e.file);
+          await this.backend.load(name, e.file, { stream: e.kind === 'music' });
           this.infos.set(name, {
             duration: e.duration,
             ...(e.loopStart !== undefined ? { loopStart: e.loopStart } : {}),
@@ -256,43 +277,58 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
     return p;
   }
 
-  /** Loads the given sounds (default: every known sound). */
+  /** Loads the given sounds (default: every known sound; music loads streamed, so this is cheap on mini-games). */
   async preload(names: string[] = this.names()): Promise<void> {
     await this.ready;
     await Promise.all(names.map((n) => this.load(n)));
   }
 
+  /** Stops and frees a loaded sound (backend.unload); the next play loads it again. */
+  unload(name: string): void {
+    for (const v of this.voices.get(name) ?? []) v.inst.stop();
+    this.voices.delete(name);
+    if (this.current?.name === name) this.fadeOutCurrent(0);
+    for (const v of this.fading) if (v.name === name) v.inst.stop();
+    this.fading = this.fading.filter((v) => v.name !== name);
+    this.unloadAt.delete(name);
+    this.infos.delete(name);
+    this.backend.unload?.(name);
+  }
+
   private async synthesize(name: string): Promise<boolean> {
-    const loadPcm = this.backend.loadPcm?.bind(this.backend);
-    if (!loadPcm) return false;
-    const sfx = this.library.sfx?.[name];
-    const song = sfx ? undefined : this.library.music?.[name];
-    let s: Synthesized;
-    if (sfx) {
-      const params = typeof sfx === 'function' ? sfx() : sfx;
-      s = synthesizeOnce(params, 44100, () => {
-        const pcm = renderSfx(params, 44100);
-        return { pcm, sampleRate: 44100, info: { duration: pcm.length / 44100, source: 'synth' } };
-      });
-    } else if (song) {
-      s = synthesizeOnce(song, this.opts.fallbackMusicRate, () => {
-        const sr = this.opts.fallbackMusicRate;
-        const r = renderSong(song, { sampleRate: sr });
-        const pcm = new Float32Array(r.left.length);
-        for (let i = 0; i < pcm.length; i++) pcm[i] = (r.left[i]! + r.right[i]!) * 0.5;
-        const info: SoundInfo = {
-          duration: r.duration,
-          ...(r.loopStart !== undefined ? { loopStart: r.loopStart, loopEnd: r.loopEnd! } : {}),
-          source: 'synth',
-        };
-        return { pcm, sampleRate: sr, info };
-      });
-    } else {
-      return false;
+    // Dev convenience: the inline NODE_ENV test lets release bundles drop the synth / DSP code behind it.
+    if (process.env.NODE_ENV !== 'production') {
+      const loadPcm = this.backend.loadPcm?.bind(this.backend);
+      if (!loadPcm) return false;
+      const sfx = this.library.sfx?.[name];
+      const song = sfx ? undefined : this.library.music?.[name];
+      let s: Synthesized;
+      if (sfx) {
+        s = synthesizeOnce(sfx, 44100, () => {
+          const pcm = renderSfx(typeof sfx === 'function' ? sfx() : sfx, 44100);
+          return { pcm, sampleRate: 44100, info: { duration: pcm.length / 44100, source: 'synth' } };
+        });
+      } else if (song) {
+        s = synthesizeOnce(song, this.opts.fallbackMusicRate, () => {
+          const sr = this.opts.fallbackMusicRate;
+          const r = renderSong(song, { sampleRate: sr });
+          const pcm = new Float32Array(r.left.length);
+          for (let i = 0; i < pcm.length; i++) pcm[i] = (r.left[i]! + r.right[i]!) * 0.5;
+          const info: SoundInfo = {
+            duration: r.duration,
+            ...(r.loopStart !== undefined ? { loopStart: r.loopStart, loopEnd: r.loopEnd! } : {}),
+            source: 'synth',
+          };
+          return { pcm, sampleRate: sr, info };
+        });
+      } else {
+        return false;
+      }
+      await loadPcm(name, s.pcm, s.sampleRate);
+      this.infos.set(name, { ...s.info });
+      return true;
     }
-    await loadPcm(name, s.pcm, s.sampleRate);
-    this.infos.set(name, { ...s.info });
-    return true;
+    return false;
   }
 
   // ---------------------------------------------------------------- volumes
@@ -438,6 +474,7 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
 
   private startMusic(name: string, fade: number): void {
     if (this.current) return;
+    this.unloadAt.delete(name);
     if (!this.isLoaded(name)) {
       void this.load(name).then((ok) => {
         if (ok && this.musicName === name && !this.current && !this.hidden && this.channelGain('music') > 0) {
@@ -470,7 +507,7 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
     this.current = null;
     if (!cur) return;
     if (fade <= 0) {
-      cur.inst.stop();
+      this.stopMusicVoice(cur);
       return;
     }
     cur.target = 0;
@@ -479,18 +516,39 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
   }
 
   private stopMusicVoices(): void {
-    this.current?.inst.stop();
+    if (this.current) this.stopMusicVoice(this.current);
     this.current = null;
-    for (const v of this.fading) v.inst.stop();
+    for (const v of this.fading) this.stopMusicVoice(v);
     this.fading = [];
+  }
+
+  /** Stops a music voice and schedules its track's unload (cancelled when the track plays again). */
+  private stopMusicVoice(v: MusicVoice): void {
+    v.inst.stop();
+    const delay = this.opts.musicUnloadMs;
+    if (this.backend.unload && Number.isFinite(delay)) this.unloadAt.set(v.name, this.clock + Math.max(0, delay));
+  }
+
+  private unloadDue(): void {
+    for (const [name, at] of this.unloadAt) {
+      if (this.clock < at) continue;
+      this.unloadAt.delete(name);
+      if (this.current?.name === name || this.fading.some((v) => v.name === name)) continue;
+      this.infos.delete(name);
+      this.backend.unload?.(name);
+    }
   }
 
   private applyMusicVolume(v: MusicVoice): void {
     v.inst.setVolume(v.gain * v.volume * this.channelGain('music'));
   }
 
-  /** Advances fades by `dtMs`. Called automatically every rendered frame (also while the game is paused). */
+  /**
+   * Advances fades and delayed music unloads by `dtMs`. Called automatically every rendered frame (also while the
+   * game is paused, not while it is hidden).
+   */
   update(dtMs: number): void {
+    this.clock += dtMs;
     const step = (v: MusicVoice): boolean => {
       if (v.gain === v.target) return true;
       const d = v.speed * dtMs;
@@ -502,10 +560,11 @@ export class AudioManager extends Emitter<AudioManagerEvents> {
     if (this.fading.length) {
       this.fading = this.fading.filter((v) => {
         const alive = step(v);
-        if (!alive) v.inst.stop();
+        if (!alive) this.stopMusicVoice(v);
         return alive;
       });
     }
+    if (this.unloadAt.size) this.unloadDue();
   }
 
   private tick(): void {

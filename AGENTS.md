@@ -114,6 +114,10 @@ tests/             cross-module tests
   size in design units, `game.safe` the safe rect. Lay out against these, never against raw screen pixels.
 - Node local space: origin at the content box top-left; (x, y) positions the anchor; anchor is the pivot.
   Subclasses override `draw(ctx)` and `describe()` (props shown in dumps / usable in selectors) and `kind`.
+  Rendering is flat (`setTransform` per node, no save/restore): `draw()` / `drawOver()` must reset the canvas state
+  they change (shadows, line dash, lineCap/lineJoin, composite op) or set `isolate: true`; Vitest warns about leaks.
+  Render overrides move children with `renderChildrenWith` / `renderChildrenOffset`, never a raw `ctx.save()`
+  (see the `engine-extend` skill).
 - Selectors: `Kind#id.tag[key=value][key*=sub]`, descendant `A B`, child `A > B`.
   `describe()` keys are attributes, e.g. `Text[text=开始]`.
 - Input: `node.onTap(fn)`; events bubble; `game.on('pointerdown', ...)` for stage-level input.
@@ -123,6 +127,11 @@ tests/             cross-module tests
 - Per-frame: override `update(dt)` or use `node.onUpdate(fn)`; global systems via `game.addSystem()`.
   Gameplay simulation: `fixedUpdate(this, 60, (step) => ...)` with a node target (stops on destroy, pauses with
   the node); never hand-roll an accumulator. Restart a level with `game.scenes.restart({ transition: 'fade' })`.
+- Lifetimes: `sequence()` / `parallel()` belong to the scene of their first animated node (else the top scene), and
+  modals / toasts to the top scene; both die with it. Pass `{ owner: null }` for app-level ones, `{ owner: node }`
+  to bind to a node.
+- Frame rate / memory: `game.setFrameRate(30)` on menus and pause screens, 60 in gameplay; free rebuildable
+  textures in `game.on('memorywarning', ...)` (engine caches are already dropped).
 - Physics: `PhysicsWorld`/`ArcadeBody` for tile-map characters (platformer, top-down); `RigidWorld` for anything
   that stacks, rolls or rotates (crates, balls, merge games). Game rules read `world.touches` / contact events;
   add/remove inside callbacks is deferred to the end of the step. See the `physics` skill.
@@ -182,3 +191,12 @@ tests/             cross-module tests
 - New app folders must be covered by tsconfig/vitest includes (see the `make-a-game` skill).
 - Mini-game runtimes: no DOM, `performance.now()` is in microseconds on wx/tt (adapters convert), fonts default
   to `'sans-serif'`. Only real devtools/phones prove a platform works; the headless and browser shots do not.
+- Dev-only code goes in an inline `if (process.env.NODE_ENV !== 'production') { ... }` (no early return, no helper
+  variable) so release builds drop it; review scenes go in `AppDef.devScenes`. Release builds fail when the audio
+  manifest misses a library sound: run `pnpm audio --app <app>`. `pnpm build` prints game.js size per folder.
+- Text: `TextStyle.cache` ('auto' default) draws static / stroked labels from shared bitmaps; change styles with
+  `setStyle`, not by mutating the style object.
+- Physics replays / golden values are engine-version specific (float details such as `Math.sqrt` vs `hypot` change
+  results); determinism holds within one version.
+- Scratch scripts run with tsx outside the repo need `TSX_TSCONFIG_PATH=<repo>/tsconfig.json`, otherwise class
+  fields get define semantics and benchmarks lie.

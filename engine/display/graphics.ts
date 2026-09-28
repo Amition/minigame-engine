@@ -514,6 +514,9 @@ export class Graphics extends Node {
       }
     }
     ctx.globalAlpha = base;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+    ctx.miterLimit = 10;
   }
 
   override hitTest(lx: number, ly: number): boolean {
@@ -539,9 +542,9 @@ export class Graphics extends Node {
     ctx.beginPath();
     ctx.rect(b.x, b.y, b.w, b.h);
     ctx.clip();
-    this.draw(ctx);
+    this.renderDraw(ctx);
     this.renderChildren(ctx);
-    this.drawOver(ctx);
+    this.renderDrawOver(ctx);
   }
 
   override describe() {

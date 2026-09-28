@@ -155,6 +155,91 @@ describe('AudioManager', () => {
     audio.playMusic('a', { fadeMs: 0 });
     expect(lastLog()!.opts).toMatchObject({ loop: true, loopStart: 0.025, loopEnd: 1.025 });
   });
+
+  /** Headless game over a manifest with two sfx and two music tracks (the files are never read). */
+  async function manifestGame(): Promise<TestGame> {
+    tmp = mkdtempSync(join(tmpdir(), 'audio-test-'));
+    mkdirSync(join(tmp, 'audio'));
+    const manifest: AudioManifest = {
+      version: 1,
+      sampleRate: 44100,
+      sounds: {
+        coin: { file: 'audio/coin.mp3', kind: 'sfx', duration: 0.3 },
+        jump: { file: 'audio/jump.mp3', kind: 'sfx', duration: 0.3 },
+        a: { file: 'audio/a.mp3', kind: 'music', duration: 1 },
+        b: { file: 'audio/b.mp3', kind: 'music', duration: 1 },
+      },
+    };
+    writeFileSync(join(tmp, 'audio/manifest.json'), JSON.stringify(manifest));
+    return (t = await createTestGame({ assetsDir: tmp }));
+  }
+  const settle = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it('preloads every sfx by default (sfx decoded, music streamed on demand)', async () => {
+    await manifestGame();
+    const audio = createAudioManager(t!.game);
+    await audio.ready;
+    await settle();
+    const backend = t!.platform.audio;
+    expect([...backend.loaded.keys()].sort()).toEqual(['coin', 'jump']);
+    expect(backend.hints.get('coin')).toEqual({ stream: false });
+    expect(audio.playSfx('coin')).not.toBeNull();
+    await audio.load('a');
+    expect(backend.hints.get('a')).toEqual({ stream: true });
+  });
+
+  it('can opt out of the sfx preload', async () => {
+    await manifestGame();
+    const audio = createAudioManager(t!.game, { preloadSfx: false });
+    await audio.ready;
+    await settle();
+    expect(t!.platform.audio.loaded.size).toBe(0);
+    expect(audio.playSfx('coin')).toBeNull();
+  });
+
+  it('unloads a stopped music track after musicUnloadMs unless it plays again', async () => {
+    await manifestGame();
+    const audio = createAudioManager(t!.game, { musicUnloadMs: 1000 });
+    const backend = t!.platform.audio;
+    const unloads = () => backend.log.filter((e) => e.action === 'unload').map((e) => e.key);
+    await audio.preload(['a', 'b']);
+    audio.playMusic('a', { fadeMs: 0 });
+    audio.playMusic('b', { fadeMs: 200 });
+    await t!.advance(0.5);
+    expect(backend.log.some((e) => e.key === 'a' && e.action === 'stop')).toBe(true);
+    expect(audio.isLoaded('a')).toBe(true);
+    await t!.advance(1);
+    expect(unloads()).toEqual(['a']);
+    expect(audio.isLoaded('a')).toBe(false);
+    expect(audio.isLoaded('b')).toBe(true);
+
+    audio.playMusic('a', { fadeMs: 0 });
+    await settle();
+    await t!.step(1);
+    expect(audio.isLoaded('a')).toBe(true);
+    expect(t!.played().filter((k) => k === 'a')).toHaveLength(2);
+    await t!.advance(0.5);
+    audio.playMusic('b', { fadeMs: 0 });
+    await t!.advance(2);
+    expect(unloads()).toEqual(['a', 'a']);
+    expect(audio.isLoaded('b')).toBe(true);
+  });
+
+  it('keeps tracks with musicUnloadMs Infinity and frees sounds on unload()', async () => {
+    await manifestGame();
+    const audio = createAudioManager(t!.game, { musicUnloadMs: Infinity });
+    await audio.preload(['a', 'coin']);
+    audio.playMusic('a', { fadeMs: 0 });
+    audio.stopMusic(0);
+    await t!.advance(10);
+    expect(audio.isLoaded('a')).toBe(true);
+    const sfx = audio.playSfx('coin')!;
+    audio.unload('coin');
+    expect(sfx.playing).toBe(false);
+    expect(audio.isLoaded('coin')).toBe(false);
+    expect(audio.info('coin')).toBeNull();
+    expect(await audio.load('coin')).toBe(true);
+  });
 });
 
 describe('audio-lab scene', () => {

@@ -22,6 +22,7 @@ import {
   type UIItemLayout,
   type UILayoutProps,
 } from './layout';
+import { UIGradientCache } from './paint';
 import { uiColor, uiRadius, uiShadow, type UIColor, type UIRadius, type UIShadow } from './theme';
 
 /** Linear gradient: colors top→bottom, or `{ colors, dir }`. */
@@ -109,25 +110,51 @@ export function makeUIGradient(ctx: Ctx2D, g: UIGradient, w: number, h: number, 
   return grad;
 }
 
-function insetRadius(r: number | [number, number, number, number], d: number): number | [number, number, number, number] {
-  return typeof r === 'number' ? Math.max(0, r - d) : (r.map((v) => Math.max(0, v - d)) as [number, number, number, number]);
+const insetScratch: [number, number, number, number] = [0, 0, 0, 0];
+
+/** Box outline inset by `d` (corner radii shrink with it). */
+function boxPath(ctx: Ctx2D, x: number, y: number, w: number, h: number, r: number | [number, number, number, number], d: number): void {
+  ctx.beginPath();
+  if (r === 0) ctx.rect(x + d, y + d, w - 2 * d, h - 2 * d);
+  else if (typeof r === 'number') roundRectPath(ctx, x + d, y + d, w - 2 * d, h - 2 * d, Math.max(0, r - d));
+  else {
+    insetScratch[0] = Math.max(0, r[0] - d);
+    insetScratch[1] = Math.max(0, r[1] - d);
+    insetScratch[2] = Math.max(0, r[2] - d);
+    insetScratch[3] = Math.max(0, r[3] - d);
+    roundRectPath(ctx, x + d, y + d, w - 2 * d, h - 2 * d, insetScratch);
+  }
 }
 
-/** Paints a box background (shadow, fill or gradient, inner border) in local space (0,0)-(w,h). */
+const boxGradients = new WeakMap<object, UIGradientCache>();
+const gradientScratch: string[] = [];
+
+/** The box's gradient from its cache (keyed on the props object): rebuilt only when ctx, rect or colours change. */
+function boxGradient(ctx: Ctx2D, owner: object, g: UIGradient, w: number, h: number, x: number, y: number): CanvasGradient {
+  const dir = Array.isArray(g) ? 'down' : (g.dir ?? 'down');
+  const src = gradientColors(g);
+  const n = src.length;
+  for (let i = 0; i < n; i++) gradientScratch[i] = uiColor(src[i]!);
+  let cache = boxGradients.get(owner);
+  if (!cache) boxGradients.set(owner, (cache = new UIGradientCache()));
+  return cache.getN(ctx, x, y, dir === 'down' ? x : x + w, dir === 'right' ? y : y + h, gradientScratch, n);
+}
+
+/**
+ * Paints a box background (shadow, fill or gradient, inner border) in local space (0,0)-(w,h). Gradients are cached
+ * per `s` object, so pass the same props object every frame (widgets pass themselves).
+ */
 export function drawUIBox(ctx: Ctx2D, w: number, h: number, s: UIBoxProps, x = 0, y = 0): void {
   if (w <= 0 || h <= 0) return;
   const fill = uiColor(s.fill);
   const grad = s.gradient && gradientColors(s.gradient).length ? s.gradient : null;
-  const border = s.border ? (typeof s.border === 'string' ? { color: s.border, width: 3 } : s.border) : null;
-  if (!fill && !grad && !border) return;
+  const b = s.border;
+  const borderColor = b ? (typeof b === 'string' ? b : b.color) : null;
+  const borderWidth = b ? (typeof b === 'string' ? 3 : (b.width ?? 3)) : 0;
+  if (!fill && !grad && !b) return;
   const r = uiRadius(s.radius, w, h);
-  const path = (d: number) => {
-    ctx.beginPath();
-    if (r === 0) ctx.rect(x + d, y + d, w - 2 * d, h - 2 * d);
-    else roundRectPath(ctx, x + d, y + d, w - 2 * d, h - 2 * d, insetRadius(r, d));
-  };
   if (fill || grad) {
-    path(0);
+    boxPath(ctx, x, y, w, h, r, 0);
     const sh = uiShadow(s.shadow);
     if (sh) {
       ctx.save();
@@ -136,18 +163,15 @@ export function drawUIBox(ctx: Ctx2D, w: number, h: number, s: UIBoxProps, x = 0
       ctx.shadowOffsetX = sh.x ?? 0;
       ctx.shadowOffsetY = sh.y ?? 0;
     }
-    ctx.fillStyle = grad ? makeUIGradient(ctx, grad, w, h, x, y) : fill!;
+    ctx.fillStyle = grad ? boxGradient(ctx, s, grad, w, h, x, y) : fill!;
     ctx.fill();
     if (sh) ctx.restore();
   }
-  if (border) {
-    const bw = border.width ?? 3;
-    if (bw > 0) {
-      path(bw / 2);
-      ctx.strokeStyle = uiColor(border.color);
-      ctx.lineWidth = bw;
-      ctx.stroke();
-    }
+  if (borderColor !== null && borderWidth > 0) {
+    boxPath(ctx, x, y, w, h, r, borderWidth / 2);
+    ctx.strokeStyle = uiColor(borderColor);
+    ctx.lineWidth = borderWidth;
+    ctx.stroke();
   }
 }
 

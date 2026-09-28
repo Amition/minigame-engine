@@ -668,8 +668,24 @@ export class TileMap extends Node implements PathGrid {
     this.flagsDirty = true;
   }
 
-  protected override onDestroy(): void {
+  /**
+   * Frees the pre-rendered chunk canvases now (shrunk to 1x1: mini-game canvases are slow to be collected); visible
+   * chunks re-bake on the next draw. Called on destroy; call it for a map that stays hidden for long.
+   */
+  releaseChunks(): void {
+    for (const list of this.chunks) {
+      for (const c of list) {
+        if (!c?.surface) continue;
+        c.surface.width = 1;
+        c.surface.height = 1;
+        c.surface = null;
+      }
+    }
     this.chunks = this.chunks.map(() => []);
+  }
+
+  protected override onDestroy(): void {
+    this.releaseChunks();
   }
 
   override describe() {

@@ -4,8 +4,10 @@ import type {
   AdService,
   AudioBackend,
   AudioInstance,
+  AudioLoadHint,
   KeyValueStorage,
   LoginResult,
+  MemoryWarningInfo,
   Platform,
   PlatformGamepad,
   PlatformKeyEvent,
@@ -115,20 +117,46 @@ type AudioCtor = typeof AudioContext;
 
 const STOPPED: AudioInstance = { stop: noop, setVolume: noop, playing: false };
 
+interface WebVoice {
+  key: string;
+  gain: GainNode;
+  /** Null while a streamed sound is still decoding. */
+  src: AudioBufferSourceNode | null;
+  playing: boolean;
+}
+
 /**
- * WebAudio backend: fetch + decodeAudioData, one BufferSource + GainNode per play. The context starts
- * suspended until the first user gesture (autoplay policy), which also unlocks iOS.
+ * WebAudio backend: fetch + decodeAudioData, one BufferSource + GainNode per play. Streamed sounds (music, load hint
+ * `stream`) keep only the encoded file and are decoded when played; their PCM (10+ MB per minute) is dropped again
+ * when the last voice stops. The context starts suspended until the first user gesture (autoplay policy), which also
+ * unlocks iOS.
  */
 export class WebAudio implements AudioBackend {
+  /** Dev builds only (synth fallback). */
+  loadPcm?: (key: string, pcm: Float32Array, sampleRate: number) => Promise<void>;
+
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private readonly buffers = new Map<string, AudioBuffer>();
-  private readonly active = new Set<{ src: AudioBufferSourceNode; stop(): void }>();
+  private readonly encoded = new Map<string, { data: ArrayBuffer; url: string }>();
+  private readonly decoding = new Map<string, Promise<AudioBuffer | null>>();
+  private readonly active = new Set<WebVoice>();
   private readonly warned = new Set<string>();
   private hidden = false;
   private unlockBound = false;
 
-  constructor(private readonly base: string) {}
+  constructor(private readonly base: string) {
+    if (process.env.NODE_ENV !== 'production') {
+      this.loadPcm = async (key, pcm, sampleRate) => {
+        const ctx = this.context();
+        if (!ctx) return;
+        const buf = ctx.createBuffer(1, Math.max(1, pcm.length), sampleRate);
+        buf.getChannelData(0).set(pcm);
+        this.encoded.delete(key);
+        this.buffers.set(key, buf);
+      };
+    }
+  }
 
   /** The AudioContext, created on first use (null when WebAudio is unavailable). */
   context(): AudioContext | null {
@@ -147,83 +175,125 @@ export class WebAudio implements AudioBackend {
     return this.ctx;
   }
 
-  async load(key: string, src: string): Promise<void> {
+  async load(key: string, src: string, hint?: AudioLoadHint): Promise<void> {
     const ctx = this.context();
     if (!ctx) return;
     const url = joinUrl(this.base, src);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`failed to load audio ${url}: HTTP ${res.status}`);
     const data = await res.arrayBuffer();
-    const buf = await new Promise<AudioBuffer>((resolve, reject) => {
-      // Callback form keeps old Safari (no promise-returning decodeAudioData) working.
-      const p = ctx.decodeAudioData(data, resolve, (e) => reject(new Error(`failed to decode audio ${url}: ${e}`)));
-      if (p && typeof p.then === 'function') p.then(resolve, reject);
-    });
-    this.buffers.set(key, buf);
-  }
-
-  async loadPcm(key: string, pcm: Float32Array, sampleRate: number): Promise<void> {
-    const ctx = this.context();
-    if (!ctx) return;
-    const buf = ctx.createBuffer(1, Math.max(1, pcm.length), sampleRate);
-    buf.getChannelData(0).set(pcm);
+    if (hint?.stream) {
+      this.buffers.delete(key);
+      this.encoded.set(key, { data, url });
+      return;
+    }
+    const buf = await decodeAudio(ctx, data, url);
+    this.encoded.delete(key);
     this.buffers.set(key, buf);
   }
 
   isLoaded(key: string): boolean {
+    return this.buffers.has(key) || this.encoded.has(key);
+  }
+
+  /** True while the decoded PCM of a sound is held (streamed sounds: only while they play). */
+  isDecoded(key: string): boolean {
     return this.buffers.has(key);
+  }
+
+  unload(key: string): void {
+    for (const v of [...this.active]) if (v.key === key) this.stopVoice(v);
+    this.buffers.delete(key);
+    this.encoded.delete(key);
+    this.decoding.delete(key);
+    this.warned.delete(key);
   }
 
   play(key: string, opts: PlayOptions = {}): AudioInstance {
     const ctx = this.ctx;
     const buf = this.buffers.get(key);
-    if (!ctx || !buf || !this.master) {
+    if (!ctx || !this.master || (!buf && !this.encoded.has(key))) {
       if (!this.warned.has(key)) {
         this.warned.add(key);
         console.warn(`[audio] "${key}" ${ctx ? 'is not loaded' : 'cannot play: WebAudio unavailable'}`);
       }
       return STOPPED;
     }
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = !!opts.loop;
-    if (opts.rate !== undefined) src.playbackRate.value = opts.rate;
     const gain = ctx.createGain();
     gain.gain.value = opts.volume ?? 1;
-    src.connect(gain);
     gain.connect(this.master);
-    let playing = true;
-    const entry = {
-      src,
-      stop: () => {
-        if (!playing) return;
-        playing = false;
-        this.active.delete(entry);
-        try {
-          src.stop();
-        } catch {
-          // already stopped
-        }
-        src.disconnect();
-        gain.disconnect();
-      },
+    const voice: WebVoice = { key, gain, src: null, playing: true };
+    const start = (b: AudioBuffer | null) => {
+      if (!voice.playing) return;
+      if (!b) {
+        this.stopVoice(voice);
+        return;
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = b;
+      src.loop = !!opts.loop;
+      if (opts.rate !== undefined) src.playbackRate.value = opts.rate;
+      src.connect(gain);
+      src.onended = () => this.stopVoice(voice);
+      voice.src = src;
+      src.start();
     };
-    src.onended = () => entry.stop();
-    this.active.add(entry);
-    src.start();
+    this.active.add(voice);
+    if (buf) start(buf);
+    else void this.decodeStream(key).then(start);
     return {
-      stop: () => entry.stop(),
+      stop: () => this.stopVoice(voice),
       setVolume: (v: number) => {
         gain.gain.value = v;
       },
       get playing() {
-        return playing;
+        return voice.playing;
       },
     };
   }
 
   stopAll(): void {
-    for (const e of [...this.active]) e.stop();
+    for (const v of [...this.active]) this.stopVoice(v);
+  }
+
+  private stopVoice(v: WebVoice): void {
+    if (!v.playing) return;
+    v.playing = false;
+    this.active.delete(v);
+    if (v.src) {
+      try {
+        v.src.stop();
+      } catch {
+        // already stopped
+      }
+      v.src.disconnect();
+    }
+    v.gain.disconnect();
+    if (this.encoded.has(v.key) && !this.inUse(v.key)) this.buffers.delete(v.key);
+  }
+
+  private inUse(key: string): boolean {
+    for (const v of this.active) if (v.key === key) return true;
+    return false;
+  }
+
+  private decodeStream(key: string): Promise<AudioBuffer | null> {
+    const pending = this.decoding.get(key);
+    if (pending) return pending;
+    const enc = this.encoded.get(key)!;
+    // decodeAudioData detaches its input: decode a copy so the track can be decoded again on the next play.
+    const p: Promise<AudioBuffer | null> = decodeAudio(this.ctx!, enc.data.slice(0), enc.url)
+      .catch((e: unknown) => {
+        console.warn(`[audio] ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      })
+      .then((buf) => {
+        if (this.decoding.get(key) === p) this.decoding.delete(key);
+        if (buf && this.encoded.get(key) === enc && this.inUse(key)) this.buffers.set(key, buf);
+        return buf;
+      });
+    this.decoding.set(key, p);
+    return p;
   }
 
   suspend(): void {
@@ -253,6 +323,14 @@ export class WebAudio implements AudioBackend {
     };
     for (const e of events) window.addEventListener(e, unlock, true);
   }
+}
+
+function decodeAudio(ctx: AudioContext, data: ArrayBuffer, url: string): Promise<AudioBuffer> {
+  return new Promise<AudioBuffer>((resolve, reject) => {
+    // Callback form keeps old Safari (no promise-returning decodeAudioData) working.
+    const p = ctx.decodeAudioData(data, resolve, (e) => reject(new Error(`failed to decode audio ${url}: ${e}`)));
+    if (p && typeof p.then === 'function') p.then(resolve, reject);
+  });
 }
 
 // ------------------------------------------------------------------ ads
@@ -478,6 +556,14 @@ export class WebPlatform implements Platform {
   async login(): Promise<LoginResult> {
     return { ok: true };
   }
+
+  /** Browsers report no memory pressure: the callback never fires. */
+  onMemoryWarning(_cb: (info: MemoryWarningInfo) => void): () => void {
+    return noop;
+  }
+
+  /** No GC hook in browsers. */
+  triggerGC(): void {}
 
   /** Injects a touch event in screen CSS px, as if it came from the browser (used by automation). */
   simulateTouch(phase: TouchPhase, touches: RawTouch[]): void {

@@ -68,20 +68,38 @@ export interface AudioInstance {
   readonly playing: boolean;
 }
 
+/** How a sound will be used, so a backend can pick a decoder. */
+export interface AudioLoadHint {
+  /**
+   * Long / looping audio (music): streamed instead of decoded up front. Mini-games use a plain InnerAudioContext
+   * (never useWebAudioImplement), the web decodes it only while it plays. The AudioManager sets it from the
+   * manifest kind (`music`).
+   */
+  stream?: boolean;
+}
+
 /**
  * Low-level audio playback. Sounds are files under the app's assets dir (e.g. 'audio/coin.mp3').
  * AudioManager (engine/audio) builds groups, music, mute and pooling on top of this.
  */
 export interface AudioBackend {
-  load(key: string, src: string): Promise<void>;
-  /** Registers raw mono PCM (-1..1). Optional: web and headless support it, mini-games may not. */
+  load(key: string, src: string, hint?: AudioLoadHint): Promise<void>;
+  /** Registers raw mono PCM (-1..1). Optional, dev builds only: web and headless support it, mini-games may not. */
   loadPcm?(key: string, pcm: Float32Array, sampleRate: number): Promise<void>;
   isLoaded(key: string): boolean;
   play(key: string, opts?: PlayOptions): AudioInstance;
+  /** Stops and frees a sound (decoded data, audio contexts); load() it again before the next play. */
+  unload?(key: string): void;
   stopAll(): void;
   /** Called on hide/show so the platform can release/resume the audio session. */
   suspend(): void;
   resume(): void;
+}
+
+/** Payload of Platform.onMemoryWarning and the Game's 'memorywarning' event. */
+export interface MemoryWarningInfo {
+  /** Android level from the host (wx: 5 = moderate, 10 = low, 15 = critical); absent on iOS and elsewhere. */
+  level?: number;
 }
 
 export interface AdService {
@@ -149,4 +167,14 @@ export interface Platform {
   share(opts: ShareOptions): void;
   /** Platform login. TapTap requires it; others may resolve { ok: true } without a code. */
   login(): Promise<LoginResult>;
+
+  /** The host is low on memory (wx/tt/tap onMemoryWarning). The Game subscribes and emits 'memorywarning'. */
+  onMemoryWarning?(cb: (info: MemoryWarningInfo) => void): () => void;
+  /** Hints the host to run a garbage collection now (wx/tt/tap triggerGC); no-op elsewhere. */
+  triggerGC?(): void;
+  /**
+   * Native frame-rate cap (wx/tt/tap setPreferredFramesPerSecond, 1-60). Returns false when the host cannot do it;
+   * the Game then skips frames itself. Use Game.setFrameRate, not this.
+   */
+  setPreferredFramesPerSecond?(fps: number): boolean;
 }

@@ -2,10 +2,46 @@ import { Game } from '../core/game';
 import { Mat2D, type Rect, type Vec2 } from '../core/math';
 import type { Node } from '../scene/node';
 
-/** `from` local -> `to` local matrix; null means the stage. */
-function spaceMatrix(from: Node | null, to: Node | null): Mat2D {
-  const m = to ? to.worldMatrix().invert() : new Mat2D();
-  return from ? m.multiply(from.worldMatrix()) : m;
+const localTmp = new Mat2D();
+const fromTmp = new Mat2D();
+const spaceTmp = new Mat2D();
+const clampTmp: Rect = { x: 0, y: 0, w: 0, h: 0 };
+
+/** @internal Same as `n.worldMatrix(out)` without the per-call allocations. */
+export function worldMatrixInto(n: Node, out: Mat2D): Mat2D {
+  if (n.parent) worldMatrixInto(n.parent, out);
+  else out.identity();
+  return out.multiply(n.localMatrix(localTmp));
+}
+
+/** `from` local -> `to` local matrix, written into `out`; null means the stage. */
+function spaceMatrixInto(from: Node | null, to: Node | null, out: Mat2D): Mat2D {
+  if (to) worldMatrixInto(to, out).invert();
+  else out.identity();
+  return from ? out.multiply(worldMatrixInto(from, fromTmp)) : out;
+}
+
+/** Same as `m.applyRect({ x, y, w, h })`, written into `out`. */
+function applyRectInto(m: Mat2D, x: number, y: number, w: number, h: number, out: Rect): Rect {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < 4; i++) {
+    const cx = i < 2 ? x : x + w;
+    const cy = (i & 1) === 0 ? y : y + h;
+    const px = m.a * cx + m.c * cy + m.e;
+    const py = m.b * cx + m.d * cy + m.f;
+    if (px < minX) minX = px;
+    if (py < minY) minY = py;
+    if (px > maxX) maxX = px;
+    if (py > maxY) maxY = py;
+  }
+  out.x = minX;
+  out.y = minY;
+  out.w = maxX - minX;
+  out.h = maxY - minY;
+  return out;
 }
 
 /**
@@ -15,7 +51,12 @@ function spaceMatrix(from: Node | null, to: Node | null): Mat2D {
  *     const p = convertPoint(field, hud, enemy.x, enemy.y);
  */
 export function convertPoint(from: Node | null, to: Node | null, x: number, y: number, out: Vec2 = { x: 0, y: 0 }): Vec2 {
-  return spaceMatrix(from, to).apply(x, y, out);
+  return spaceMatrixInto(from, to, spaceTmp).apply(x, y, out);
+}
+
+function nodeRectInto(node: Node, local: Rect | undefined, space: Node | null, out: Rect): Rect {
+  const m = spaceMatrixInto(node, space, spaceTmp);
+  return local ? applyRectInto(m, local.x, local.y, local.w, local.h, out) : applyRectInto(m, 0, 0, node.width, node.height, out);
 }
 
 /**
@@ -23,7 +64,7 @@ export function convertPoint(from: Node | null, to: Node | null, x: number, y: n
  * coordinates (default: its content box). `nodeRect(n)` equals `n.worldBounds()`.
  */
 export function nodeRect(node: Node, local?: Rect, space: Node | null = null): Rect {
-  return spaceMatrix(node, space).applyRect(local ?? { x: 0, y: 0, w: node.width, h: node.height });
+  return nodeRectInto(node, local, space, { x: 0, y: 0, w: 0, h: 0 });
 }
 
 export interface FollowNodeOptions {
@@ -52,14 +93,35 @@ export type FollowRect = (space?: Node | null) => Rect;
 
 function clampArea(clamp: FollowNodeOptions['clamp'], space: Node | null): Rect | null {
   if (!clamp) return null;
-  let r: Rect;
-  if (typeof clamp === 'object') r = clamp;
+  let x = 0;
+  let y = 0;
+  let w: number;
+  let h: number;
+  if (typeof clamp === 'object') ({ x, y, w, h } = clamp);
   else {
     const g = Game.current;
     if (!g) return null;
-    r = clamp === 'view' ? { x: 0, y: 0, w: g.view.width, h: g.view.height } : g.safe;
+    if (clamp === 'view') {
+      w = g.view.width;
+      h = g.view.height;
+    } else ({ x, y, w, h } = g.safe);
   }
-  return space ? spaceMatrix(null, space).applyRect(r) : { ...r };
+  if (space) return applyRectInto(spaceMatrixInto(null, space, spaceTmp), x, y, w, h, clampTmp);
+  clampTmp.x = x;
+  clampTmp.y = y;
+  clampTmp.w = w;
+  clampTmp.h = h;
+  return clampTmp;
+}
+
+const followInto = new WeakMap<FollowRect, (space: Node | null | undefined, out: Rect) => Rect>();
+
+/** @internal Reads a followNode() getter into `out` without allocating; false for any other getter. */
+export function readFollowRect(get: unknown, space: Node | null, out: Rect): boolean {
+  const into = followInto.get(get as FollowRect);
+  if (!into) return false;
+  into(space, out);
+  return true;
 }
 
 /**
@@ -72,12 +134,18 @@ function clampArea(clamp: FollowNodeOptions['clamp'], space: Node | null): Rect 
  *     mountScreen(hudLayer, column, { area: followNode(tower, { pad: [18, 10, 8, 10], clamp: 'safe', minWidth: 150 }) });
  */
 export function followNode(target: Node, opts: FollowNodeOptions = {}): FollowRect {
-  let last: Rect = { x: 0, y: 0, w: 0, h: 0 };
-  return (mountSpace) => {
-    if (target.destroyed) return { ...last };
+  const last: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  const into = (mountSpace: Node | null | undefined, r: Rect): Rect => {
+    if (target.destroyed) {
+      r.x = last.x;
+      r.y = last.y;
+      r.w = last.w;
+      r.h = last.h;
+      return r;
+    }
     const space = opts.space !== undefined ? opts.space : (mountSpace ?? null);
     const local = typeof opts.rect === 'function' ? opts.rect(target) : opts.rect;
-    const r = nodeRect(target, local, space);
+    nodeRectInto(target, local, space, r);
     if (opts.offset) {
       r.x += opts.offset.x;
       r.y += opts.offset.y;
@@ -93,8 +161,12 @@ export function followNode(target: Node, opts: FollowNodeOptions = {}): FollowRe
       r.w = x1 - x0;
       r.h = y1 - y0;
     }
-    if (opts.pad !== undefined) {
-      const [t, rt, b, l] = typeof opts.pad === 'number' ? [opts.pad, opts.pad, opts.pad, opts.pad] : opts.pad;
+    const pad = opts.pad;
+    if (pad !== undefined) {
+      const t = typeof pad === 'number' ? pad : pad[0];
+      const rt = typeof pad === 'number' ? pad : pad[1];
+      const b = typeof pad === 'number' ? pad : pad[2];
+      const l = typeof pad === 'number' ? pad : pad[3];
       r.x += l;
       r.y += t;
       r.w = Math.max(0, r.w - l - rt);
@@ -110,9 +182,15 @@ export function followNode(target: Node, opts: FollowNodeOptions = {}): FollowRe
       r.y -= (opts.minHeight - r.h) * ay;
       r.h = opts.minHeight;
     }
-    last = r;
-    return { ...r };
+    last.x = r.x;
+    last.y = r.y;
+    last.w = r.w;
+    last.h = r.h;
+    return r;
   };
+  const get: FollowRect = (mountSpace) => into(mountSpace, { x: 0, y: 0, w: 0, h: 0 });
+  followInto.set(get, into);
+  return get;
 }
 
 export interface PinToNodeOptions {
@@ -149,8 +227,15 @@ export function pinToNode(node: Node, target: Node, opts: PinToNodeOptions = {})
       stop();
       return;
     }
-    const at = typeof opts.at === 'function' ? opts.at(target) : (opts.at ?? { x: target.width / 2, y: target.height / 2 });
-    const p = convertPoint(target, node.parent, at.x, at.y, tmp);
+    let ax: number;
+    let ay: number;
+    if (typeof opts.at === 'function') ({ x: ax, y: ay } = opts.at(target));
+    else if (opts.at) ({ x: ax, y: ay } = opts.at);
+    else {
+      ax = target.width / 2;
+      ay = target.height / 2;
+    }
+    const p = convertPoint(target, node.parent, ax, ay, tmp);
     node.x = p.x + (opts.offset?.x ?? 0);
     node.y = p.y + (opts.offset?.y ?? 0);
     if (opts.hideWithTarget) node.visible = target.worldVisible;

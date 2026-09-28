@@ -1,6 +1,6 @@
 import { parseColor, toCss, type Color } from '../core/color';
 import { platform } from '../platform/current';
-import { bakeTexture, resolveTextureResolution, ScaledTexture, Texture, type TextureResolution } from './texture';
+import { bakeTexture, releaseTexture, resolveTextureResolution, ScaledTexture, Texture, type TextureResolution } from './texture';
 import { textures } from './textures';
 import type { Surface } from './types';
 
@@ -40,7 +40,10 @@ interface TintVariant {
   tex: Texture;
 }
 
-/** Variants kept per source; older ones leave the cache (textures still referenced elsewhere keep working). */
+/**
+ * Variants kept per source. Baking one more releases the oldest bake (canvas shrunk to 1x1, like releaseTexture):
+ * Sprite.tint and ui icons look their tint up on every draw and simply re-bake it.
+ */
 const MAX_VARIANTS = 16;
 
 let cache = new WeakMap<Texture, TintVariant[]>();
@@ -60,7 +63,9 @@ let anonCount = 0;
  * the source itself. The cache is keyed on the Texture object, so re-registering a key (`textures.set`) bakes a
  * fresh tint on the next call. Strings resolve through the `textures` registry; an unregistered key returns a
  * 1x1 transparent placeholder named `missing:<key>` (not cached, so the real texture is used once registered).
- * Bake at load or scene enter, not per frame with changing colours: each distinct colour is a new canvas.
+ * Bake at load or scene enter, not per frame with changing colours: each distinct colour is a new canvas. At most 16
+ * variants per source stay cached; the oldest is then released, so code that keeps a result (instead of calling
+ * tintTexture per draw like Sprite.tint) must not hold more than 16 colours of one source.
  */
 export function tintTexture(src: Texture | string, color: Color, opts?: TintTextureOptions): Texture {
   const tex = sourceOf(src);
@@ -162,6 +167,7 @@ export function duotoneTexture(src: Texture | string, dark: Color, light: Color,
 /**
  * Forgets every cached tint / duotone (the next call bakes again; textures you still hold stay valid) and re-probes
  * tintMultiplySupported(). Re-bakes reuse their textureStats keys, so the old entries are replaced there.
+ * Game.memoryWarning() calls it.
  */
 export function clearTintCache(): void {
   cache = new WeakMap();
@@ -235,7 +241,11 @@ function lookup(tex: Texture, kind: number, a: string, b: string, amount: number
 function remember(src: Texture, kind: number, a: string, b: string, amount: number, res: number, method: number, tex: Texture): Texture {
   let list = cache.get(src);
   if (!list) cache.set(src, (list = []));
-  if (list.length >= MAX_VARIANTS) list.shift();
+  if (list.length >= MAX_VARIANTS) {
+    const old = list.shift()!.tex;
+    // No-op variants (white multiply, strength 0) are the source itself: never release those.
+    if (old.source !== src.source) releaseTexture(old);
+  }
   list.push({ kind, a, b, amount, res, method, tex });
   return tex;
 }

@@ -1,6 +1,6 @@
 import type { Game } from '../core/game';
 import type { Node } from '../scene/node';
-import { getTicker, isTreePaused, resolveGame, TIME_EPS, type Tickable } from './ticker';
+import { getTicker, invalidatePauseCache, ownerPaused, resolveGame, TIME_EPS, type Tickable } from './ticker';
 
 export interface TimerOptions {
   /** Cancelled when this node is destroyed; frozen while its subtree is paused. */
@@ -78,6 +78,7 @@ export class Timer implements Tickable {
     if (this.state !== 'running') return;
     this.count++;
     const r = this.fn(this.count);
+    invalidatePauseCache();
     if (this.state === 'running' && (r === false || this.count >= this.maxCount)) this.end('done');
   }
 
@@ -89,11 +90,12 @@ export class Timer implements Tickable {
         this.cancel();
         return false;
       }
-      if (isTreePaused(o)) return true;
+      if (ownerPaused(o)) return true;
     }
     if (this._paused) return true;
     this.elapsed += dt;
     const step = Math.max(0, this.interval);
+    if (this.elapsed < step - TIME_EPS) return true;
     while (this.state === 'running' && this.elapsed >= step - TIME_EPS) {
       this.elapsed -= step;
       this.fire();
@@ -152,7 +154,7 @@ export function nextFrame(game?: Game): Promise<number> {
 /** Cancels every timer owned by `owner`. Returns how many were cancelled. */
 export function cancelTimersOf(owner: Node): number {
   const set = byOwner.get(owner);
-  if (!set) return 0;
+  if (!set || set.size === 0) return 0;
   const list = [...set];
   for (const t of list) t.cancel();
   return list.length;

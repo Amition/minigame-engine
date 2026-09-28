@@ -116,7 +116,7 @@ input.onPress('pause', () => this.openPause(), this);
 | `down(a)` / `pressed(a)` / `released(a)` | held / went down this frame / went up this frame |
 | `value(a)` | 0..1, strongest source (keys 1, sticks and triggers analog) |
 | `axis(neg, pos)` | `value(pos) - value(neg)`, -1..1 |
-| `vector(l, r, u, d)` | `{ x, y }` clamped to length 1 (diagonals not faster) |
+| `vector(l, r, u, d, out?)` | `{ x, y }` clamped to length 1 (diagonals not faster); pass `out` to reuse an object per frame |
 | `downActions()` | held action names (HUD / debug) |
 | `bindHold(a, node)` | held while a finger is down on the node (keeps holding when it slides; a very short touch still counts one frame) |
 | `bindStick(a, stick)` | VirtualJoystick directions, analog |
@@ -157,7 +157,7 @@ Binding codes are `'Pad' + ` one of `A B X Y LB RB LT RT Back Start LS RS Up Dow
 const pad = gamepadInput(this.game);    // pad.supported is false outside the web
 pad.deadZone = 0.2;
 if (pad.connected && pad.justPressed('PadStart')) this.openPause();
-const aim = pad.stick('right');         // { x, y } with a radial dead zone
+const aim = pad.stick('right');         // { x, y } with a radial dead zone; stick(side, pad, out) fills `out`
 ```
 
 Browsers only report a pad after a button press on the page, and only in secure contexts (https / localhost).
